@@ -1,5 +1,0 @@
-.section .l2_bulk.mobilevit_reference, "a", @progbits
-.balign 16
-.global mobilevit_reference_data_start
-mobilevit_reference_data_start:
-.incbin "@CMAKE_CURRENT_SOURCE_DIR@/data/reference-data.bin"
