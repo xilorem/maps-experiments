@@ -1,4 +1,4 @@
-"""Run the 4x4 pipelined MAPS MobileViT proof."""
+"""Compare MAPS and full-mesh execution of the 4x4 MobileViT slice."""
 
 from __future__ import annotations
 
@@ -23,7 +23,14 @@ from .mobilevit import (
     generate_onnx_references,
     generate_runtime_inputs,
 )
-from .runtime import instrument_application, parse_runtime_log, write_measurements
+from .reference import (
+    APPLICATION_NAME as REFERENCE_APPLICATION_NAME,
+    comparison_summary,
+    parse_reference_log,
+    prepare_reference_application,
+    write_comparison,
+)
+from .runtime import instrument_application, parse_runtime_log
 
 
 APPLICATION_NAME = "maps_mobilevit_pipeline"
@@ -143,6 +150,7 @@ def _build_in_sdk(
     application: Path,
     build: Path,
     log: Path,
+    application_name: str,
 ) -> Path:
     llvm = dependencies.spatz_llvm_root / "bin"
     _run(
@@ -173,13 +181,13 @@ def _build_in_sdk(
             str(build),
             "--target",
             "spatz_bootrom",
-            APPLICATION_NAME,
+            application_name,
             "-j",
             "8",
         ],
         log,
     )
-    return build / f"bin/{APPLICATION_NAME}"
+    return build / f"bin/{application_name}"
 
 
 def _simulate(
@@ -227,11 +235,13 @@ def run() -> Path:
     dependencies = discover_dependencies(artifact_root, os.environ)
     model = artifact_root / "workloads/mobilevit/model/mobilevit-nodes-170-179.onnx"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    result_dir = artifact_root / f"workloads/mobilevit/results/{timestamp}-maps-4x4"
+    result_dir = artifact_root / f"workloads/mobilevit/results/{timestamp}-comparison-4x4"
     work = result_dir / "work"
     work.mkdir(parents=True)
-    log = result_dir / "run.log"
-    log.write_text("", encoding="utf-8")
+    maps_log = result_dir / "maps.log"
+    reference_log = result_dir / "full-mesh.log"
+    maps_log.write_text("", encoding="utf-8")
+    reference_log.write_text("", encoding="utf-8")
 
     reproduced_model = work / "mobilevit-nodes-170-179.onnx"
     extract_mobilevit_slice(
@@ -247,33 +257,68 @@ def run() -> Path:
         inputs,
         work / "onnx-runtime-references.bin",
     )
-    application = work / "application"
-    _build_application(dependencies, model, inputs, application, log)
-    application_facts = instrument_application(application, references)
-    build = artifact_root / "workloads/mobilevit/.build/maps-4x4"
-    executable = _build_in_sdk(dependencies, application, build, log)
-    simulation_text = _simulate(
+    maps_application = work / "maps/application"
+    maps_application.parent.mkdir()
+    _build_application(dependencies, model, inputs, maps_application, maps_log)
+    application_facts = instrument_application(maps_application, references)
+    maps_build = artifact_root / "workloads/mobilevit/.build/maps-4x4"
+    maps_executable = _build_in_sdk(
         dependencies,
-        executable,
-        build / "bin/bootrom/spatz_init.bin",
-        work / "gvsoc-work",
-        log,
+        maps_application,
+        maps_build,
+        maps_log,
+        APPLICATION_NAME,
     )
-    runtime_result = parse_runtime_log(
-        simulation_text,
+    maps_simulation_text = _simulate(
+        dependencies,
+        maps_executable,
+        maps_build / "bin/bootrom/spatz_init.bin",
+        work / "maps/gvsoc-work",
+        maps_log,
+    )
+    maps_result = parse_runtime_log(
+        maps_simulation_text,
         TOKEN_COUNT,
         application_facts["active_tile_ids"],
     )
-    write_measurements(
+
+    reference_application = work / "full-mesh/application"
+    reference_application.parent.mkdir()
+    prepare_reference_application(
+        artifact_root / "workloads/mobilevit/full-mesh-reference",
+        reference_application,
+        model,
+        inputs,
+        references,
+    )
+    reference_build = artifact_root / "workloads/mobilevit/.build/full-mesh-4x4"
+    reference_executable = _build_in_sdk(
+        dependencies,
+        reference_application,
+        reference_build,
+        reference_log,
+        REFERENCE_APPLICATION_NAME,
+    )
+    reference_simulation_text = _simulate(
+        dependencies,
+        reference_executable,
+        reference_build / "bin/bootrom/spatz_init.bin",
+        work / "full-mesh/gvsoc-work",
+        reference_log,
+    )
+    reference_result = parse_reference_log(reference_simulation_text)
+
+    write_comparison(
         result_dir / "measurements.csv",
-        runtime_result,
+        maps_result,
+        reference_result,
         application_facts["active_tiles"],
         TOKEN_SLOTS,
     )
     metadata = {
         "schema": 1,
-        "experiment": "maps-mobilevit-pipeline",
-        "strategy": "maps",
+        "experiment": "maps-vs-full-mesh-mobilevit",
+        "strategies": ["maps", "full-mesh"],
         "mesh": {"width": 4, "height": 4},
         "execution_tokens": TOKEN_COUNT,
         "token_slots": TOKEN_SLOTS,
@@ -281,6 +326,7 @@ def run() -> Path:
         "output_writers": application_facts["output_writers"],
         "input_seed": INPUT_SEED,
         "validation": {"atol": REFERENCE_ATOL, "rtol": REFERENCE_RTOL},
+        "summary": comparison_summary(maps_result, reference_result),
         "measurement_window": {
             "start": "common post-input, post-initializer global boundary",
             "completion": "last globally required output writer for each token",
@@ -309,7 +355,7 @@ def run() -> Path:
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print(f"Validated MAPS MobileViT pipeline result: {result_dir}")
+    print(f"Validated MAPS/full-mesh MobileViT comparison: {result_dir}")
     return result_dir
 
 

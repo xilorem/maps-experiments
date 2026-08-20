@@ -7,8 +7,8 @@ tooling is Python so bash remains reserved for publication units.
 ## Workloads
 
 - [MobileViT](workloads/mobilevit/README.md): FP16 nodes 170 through 179. The
-  `maps-pipeline.sh` Experiment proves pipelined MAPS execution on a 4x4 MAGIA-v3 GVSoC
-  Mesh with 32 Execution Tokens and two Token Slots.
+  `compare-4x4.sh` Experiment compares pipelined MAPS execution with an artifact-owned,
+  sequential full-mesh reference on a 4x4 MAGIA-v3 GVSoC Mesh using two Execution Tokens.
 
 ## Setup
 
