@@ -10,7 +10,7 @@ import shutil
 import onnx
 from onnx import numpy_helper
 
-from .mobilevit import TOKEN_COUNT
+from .mobilevit import REFERENCE_ATOL, REFERENCE_RTOL, TOKEN_COUNT
 from .runtime import RuntimeResult
 
 
@@ -94,6 +94,8 @@ def prepare_reference_application(
         "#ifndef MOBILEVIT_REFERENCE_CONFIG_H_",
         "#define MOBILEVIT_REFERENCE_CONFIG_H_",
         f"#define REFERENCE_TOKEN_COUNT ({TOKEN_COUNT}u)",
+        f"#define REFERENCE_ATOL ({REFERENCE_ATOL}f)",
+        f"#define REFERENCE_RTOL ({REFERENCE_RTOL}f)",
     ]
     definitions.extend(
         f"#define REFERENCE_{name}_OFFSET ({offset}u)"

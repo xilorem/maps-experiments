@@ -38,6 +38,9 @@ static float16 fused[INPUT_ELEMENTS] __attribute__((section(".l2_arena"), aligne
 static float16 projected[INPUT_ELEMENTS] __attribute__((section(".l2_arena"), aligned(4)));
 static float16 outputs[REFERENCE_TOKEN_COUNT][INPUT_ELEMENTS]
     __attribute__((section(".l2_arena"), aligned(4)));
+static volatile uint32_t window_start __attribute__((section(".l2_arena")));
+static volatile uint32_t output_cycles[NUM_HARTS][REFERENCE_TOKEN_COUNT]
+    __attribute__((section(".l2_arena")));
 
 static inline const float16 *data_at(uint32_t offset)
 {
@@ -122,6 +125,7 @@ static void run_token(
     layer_barrier(fsync, event_unit);
 
     MAGIA_add_fp16_spatz(input, projected, outputs[token], INPUT_ELEMENTS);
+    output_cycles[HID][token] = read_cycle() - window_start;
     layer_barrier(fsync, event_unit);
 }
 
@@ -131,7 +135,6 @@ int main(void)
     fsync_controller_t fsync;
     eu_config_t event_config;
     eu_controller_t event_unit;
-    uint32_t window_start = 0u;
     uint32_t completion_cycles[REFERENCE_TOKEN_COUNT];
     bool valid = true;
 
@@ -154,8 +157,13 @@ int main(void)
 
     for (uint32_t token = 0u; token < REFERENCE_TOKEN_COUNT; ++token) {
         run_token(token, &fsync, &event_unit);
-        if (HID == 0u)
-            completion_cycles[token] = read_cycle() - window_start;
+        if (HID == 0u) {
+            uint32_t completion = 0u;
+            for (uint32_t tile = 0u; tile < NUM_HARTS; ++tile)
+                if (output_cycles[tile][token] > completion)
+                    completion = output_cycles[tile][token];
+            completion_cycles[token] = completion;
+        }
     }
 
     spatz_clk_dis();
@@ -176,7 +184,7 @@ int main(void)
                 const float expected_absolute = expected < 0.0f ? -expected : expected;
                 if ((actual_bits & 0x7c00u) == 0x7c00u)
                     ++nonfinite;
-                if (difference > 0.5f + 0.05f * expected_absolute)
+                if (difference > REFERENCE_ATOL + REFERENCE_RTOL * expected_absolute)
                     ++mismatches;
             }
             if (mismatches != 0u || nonfinite != 0u)
