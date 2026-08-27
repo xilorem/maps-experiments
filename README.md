@@ -1,9 +1,7 @@
 # MAPS experiments
 
-This repository contains thin, independently runnable experiment drivers for MAPS paper
-results. MAPS owns planning and application generation; `magia-sdk-v3` owns application
-builds, GVSoC execution, and the full-mesh comparison test. This repository keeps only
-the frozen workload data, orchestration, result parsing, and documentation.
+This repository contains thin, independently runnable experiment drivers for the MAPS paper
+results.
 
 ## Workloads
 

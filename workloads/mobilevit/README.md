@@ -21,7 +21,7 @@ Run the complete matrix with two Execution Tokens and two Token Slots:
 The two controls are independent:
 
 ```bash
-./run-experiment.sh --tokens 4 --token-slots 3
+./run-experiment.sh --tokens 4 --token-slots 2
 ```
 
 The runner loops over 4x4, 8x8, and 16x16. For each mesh it calls MAPS' `make build`, then
@@ -35,4 +35,4 @@ and incomplete timing results stop the experiment. Numerical mismatches, non-fin
 and missing numerical diagnostics never gate later configurations or CSV generation.
 
 The stored input file contains sixteen tokens, so `--tokens` accepts values from 1 through
-16. During ticket acceptance the experiment is exercised with exactly two tokens.
+16.
