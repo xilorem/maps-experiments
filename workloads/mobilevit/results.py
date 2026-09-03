@@ -41,6 +41,11 @@ MAPS_CHECKSUM = re.compile(
     r"^maps_mobilevit_slice token (\d+) output .* checksum: ([0-9a-fA-F]{8})$",
     re.MULTILINE,
 )
+MAPS_DURATION = re.compile(
+    r"^maps t(?P<tile>\d+) tok (?P<token>\d+) slot (?P<slot>\d+) "
+    r"(?P<phase>op|send|recv) (?P<index>\d+) cycles (?P<cycles>\d+)$",
+    re.MULTILINE,
+)
 
 
 def initializer_bytes(model: onnx.ModelProto, name: str) -> bytes:
@@ -255,6 +260,116 @@ def collect(args: argparse.Namespace) -> None:
         writer.writerows(result)
 
 
+def c_array_entries(source: str, declaration: str) -> list[str]:
+    match = re.search(declaration, source)
+    if not match:
+        return []
+    start = source.find("{", match.end())
+    depth = 0
+    entries = []
+    entry_start = None
+    for index in range(start, len(source)):
+        character = source[index]
+        if character == "{":
+            depth += 1
+            if depth == 2:
+                entry_start = index
+        elif character == "}":
+            if depth == 2 and entry_start is not None:
+                entries.append(source[entry_start : index + 1])
+                entry_start = None
+            depth -= 1
+            if depth == 0:
+                return entries
+    raise ValueError(f"unterminated generated {declaration} array")
+
+
+def generated_tile_plans(application: Path) -> tuple[
+    dict[tuple[int, int], str], dict[tuple[int, int, int], int], dict[tuple[int, int], int]
+]:
+    operation_kinds = {}
+    sends = {}
+    receivers = {}
+    for path in sorted((application / "src" / "tiles").glob("tile_*.c")):
+        source = path.read_text(encoding="utf-8")
+        hartids = re.findall(r"\.hartid = (\d+)u", source)
+        if not hartids:
+            continue
+        tile = int(hartids[-1])
+        for index, entry in enumerate(c_array_entries(source, r"static const op_desc_t .*_ops\[\] =")):
+            kind = re.search(r"\.kind = (OP_[A-Z0-9_]+)", entry)
+            operation_kinds[tile, index] = kind.group(1) if kind else "OP_UNKNOWN"
+        for entry in c_array_entries(source, r"static const fifo_send_desc_t .*_sends\[\] ="):
+            transition = re.search(r"\.transition_id = (\d+)", entry)
+            destination = re.search(r"\.dst_hartid = (\d+)", entry)
+            elements = re.search(r"\.num_elems = (\d+)u?", entry)
+            element_bytes = re.search(r"\.elem_bytes = (\d+)u?", entry)
+            if transition and destination and elements and element_bytes:
+                sends[tile, int(transition.group(1)), int(destination.group(1))] = (
+                    int(elements.group(1)) * int(element_bytes.group(1))
+                )
+        for entry in c_array_entries(source, r"static const fifo_recv_desc_t .*_recvs\[\] ="):
+            transition = re.search(r"\.transition_id = (\d+)", entry)
+            source_tile = re.search(r"\.src_hartid = (\d+)", entry)
+            if transition and source_tile:
+                receivers[tile, int(transition.group(1))] = int(source_tile.group(1))
+    return operation_kinds, sends, receivers
+
+
+def timings(args: argparse.Namespace) -> None:
+    operation_kinds, sends, receivers = generated_tile_plans(args.application)
+    events = [match.groupdict() for match in MAPS_DURATION.finditer(args.maps_log.read_text(encoding="utf-8"))]
+    if not events:
+        raise ValueError("MAPS log contains no detailed timing trace")
+    args.output.mkdir(parents=True, exist_ok=True)
+    operation_rows = {}
+    transition_rows = {}
+    for event in events:
+        tile = int(event["tile"])
+        token = int(event["token"])
+        slot = int(event["slot"])
+        index = int(event["index"])
+        cycles = int(event["cycles"])
+        if event["phase"] == "op":
+            operation_rows.setdefault(tile, []).append({
+                "tile": tile, "token": token, "slot": slot, "operation_index": index,
+                "operation_kind": operation_kinds.get((tile, index), "OP_UNKNOWN"),
+                "duration_cycles": cycles,
+            })
+            continue
+        if event["phase"] == "send":
+            for (source, transition, destination), payload_bytes in sends.items():
+                if (source, transition) != (tile, index):
+                    continue
+                row = transition_rows.setdefault((index, source, destination, token, slot), {
+                    "transition_id": index, "source_tile": source, "destination_tile": destination,
+                    "token": token, "slot": slot, "payload_bytes": payload_bytes,
+                    "send_idma_duration_cycles": "", "receiver_visibility_wait_cycles": "",
+                })
+                row["send_idma_duration_cycles"] = cycles
+        else:
+            source = receivers.get((tile, index), 0)
+            payload_bytes = sends.get((source, index, tile), 0)
+            destination = tile
+            row = transition_rows.setdefault((index, source, destination, token, slot), {
+                "transition_id": index, "source_tile": source, "destination_tile": destination,
+                "token": token, "slot": slot, "payload_bytes": payload_bytes,
+                "send_idma_duration_cycles": "", "receiver_visibility_wait_cycles": "",
+            })
+            row["receiver_visibility_wait_cycles"] = cycles
+    operation_fields = ("tile", "token", "slot", "operation_index", "operation_kind", "duration_cycles")
+    for tile, rows_for_tile in operation_rows.items():
+        with (args.output / f"tile_{tile}.csv").open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=operation_fields)
+            writer.writeheader()
+            writer.writerows(rows_for_tile)
+    transition_fields = ("transition_id", "source_tile", "destination_tile", "token", "slot", "payload_bytes", "send_idma_duration_cycles", "receiver_visibility_wait_cycles")
+    with (args.output / "transitions.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=transition_fields)
+        writer.writeheader()
+        writer.writerows(transition_rows.values())
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(required=True)
@@ -274,6 +389,11 @@ def parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--reference-available", type=Path, required=True)
     collect_parser.add_argument("--csv", type=Path, required=True)
     collect_parser.set_defaults(function=collect)
+    timings_parser = commands.add_parser("timings")
+    timings_parser.add_argument("--maps-log", type=Path, required=True)
+    timings_parser.add_argument("--application", type=Path, required=True)
+    timings_parser.add_argument("--output", type=Path, required=True)
+    timings_parser.set_defaults(function=timings)
     return root
 
 

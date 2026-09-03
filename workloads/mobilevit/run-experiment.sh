@@ -7,6 +7,11 @@ usage() {
 
 tokens=2
 token_slots=2
+maps_timings="${MAPS_TIMINGS:-0}"
+if [[ "$maps_timings" != 0 && "$maps_timings" != 1 ]]; then
+  echo "MAPS_TIMINGS must be 0 or 1" >&2
+  exit 2
+fi
 while (($#)); do
   case "$1" in
   --tokens)
@@ -86,16 +91,29 @@ for tiles in ${MESH_SIZES:-4}; do
     INPUT="$input_name=$prepared/inputs.bin" \
     APPLICATION="$application" 2>&1 | tee -a "$build_log"
 
+  if ((maps_timings)); then
+    cat >>"$application/CMakeLists.txt" <<'EOF'
+
+# Experiment-only detailed timing trace for this generated MAPS application.
+target_compile_definitions(maps_mobilevit_slice PRIVATE
+  MAPS_ENABLE_TRACE=1
+  MAPS_EXPERIMENT_TRACE=1
+)
+EOF
+  fi
+
   make -C "$sdk_root" gvsoc tiles="$tiles" 2>&1 | tee -a "$build_log"
 
   sdk_build_args=(
     tiles="$tiles"
     CMAKE_BUILDDIR="$sdk_build"
     maps_application_dir="$application"
-    maps_experiment_trace=1
     mobilevit_slice_data="$prepared/slice-data.bin"
     mobilevit_slice_tokens="$tokens"
   )
+  if ((maps_timings)); then
+    sdk_build_args+=(maps_experiment_trace=0)
+  fi
   make -C "$sdk_root" build "${sdk_build_args[@]}" test=spatz_bootrom 2>&1 | tee -a "$build_log"
   make -C "$sdk_root" build "${sdk_build_args[@]}" test=maps_mobilevit_slice 2>&1 | tee -a "$build_log"
   make -C "$sdk_root" build "${sdk_build_args[@]}" test=onnx_mobilevit_slice 2>&1 | tee -a "$build_log"
@@ -122,6 +140,12 @@ for tiles in ${MESH_SIZES:-4}; do
     --reference-checksums "$prepared/reference-checksums.csv" \
     --reference-available "$prepared/reference-available.txt" \
     --csv "$csv"
+  if ((maps_timings)); then
+    "$python" "$experiment_root/results.py" timings \
+      --maps-log "$maps_log" \
+      --application "$application" \
+      --output "$mesh_root/maps-timings"
+  fi
 done
 
 echo "Results: $csv"
