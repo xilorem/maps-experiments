@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 import re
 
@@ -43,7 +44,7 @@ MAPS_CHECKSUM = re.compile(
 )
 MAPS_DURATION = re.compile(
     r"^maps t(?P<tile>\d+) tok (?P<token>\d+) slot (?P<slot>\d+) "
-    r"(?P<phase>op|send|recv) (?P<index>\d+) cycles (?P<cycles>\d+)$",
+    r"(?P<phase>op|send|recv) (?P<index>\d+)(?: start (?P<start>\d+) end (?P<end>\d+))? cycles (?P<cycles>\d+)$",
     re.MULTILINE,
 )
 
@@ -330,6 +331,8 @@ def timings(args: argparse.Namespace) -> None:
         slot = int(event["slot"])
         index = int(event["index"])
         cycles = int(event["cycles"])
+        start = event["start"] or ""
+        end = event["end"] or ""
         if event["phase"] == "op":
             operation_rows.setdefault(tile, []).append({
                 "tile": tile, "token": token, "slot": slot, "operation_index": index,
@@ -344,9 +347,12 @@ def timings(args: argparse.Namespace) -> None:
                 row = transition_rows.setdefault((index, source, destination, token, slot), {
                     "transition_id": index, "source_tile": source, "destination_tile": destination,
                     "token": token, "slot": slot, "payload_bytes": payload_bytes,
-                    "send_idma_duration_cycles": "", "receiver_visibility_wait_cycles": "",
+                    "send_start_cycle": "", "send_end_cycle": "", "send_idma_duration_cycles": "",
+                    "receiver_wait_start_cycle": "", "receiver_visible_cycle": "", "receiver_visibility_wait_cycles": "",
                 })
                 row["send_idma_duration_cycles"] = cycles
+                row["send_start_cycle"] = start
+                row["send_end_cycle"] = end
         else:
             source = receivers.get((tile, index), 0)
             payload_bytes = sends.get((source, index, tile), 0)
@@ -354,20 +360,75 @@ def timings(args: argparse.Namespace) -> None:
             row = transition_rows.setdefault((index, source, destination, token, slot), {
                 "transition_id": index, "source_tile": source, "destination_tile": destination,
                 "token": token, "slot": slot, "payload_bytes": payload_bytes,
-                "send_idma_duration_cycles": "", "receiver_visibility_wait_cycles": "",
+                "send_start_cycle": "", "send_end_cycle": "", "send_idma_duration_cycles": "",
+                "receiver_wait_start_cycle": "", "receiver_visible_cycle": "", "receiver_visibility_wait_cycles": "",
             })
             row["receiver_visibility_wait_cycles"] = cycles
+            row["receiver_wait_start_cycle"] = start
+            row["receiver_visible_cycle"] = end
     operation_fields = ("tile", "token", "slot", "operation_index", "operation_kind", "duration_cycles")
     for tile, rows_for_tile in operation_rows.items():
         with (args.output / f"tile_{tile}.csv").open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=operation_fields)
             writer.writeheader()
             writer.writerows(rows_for_tile)
-    transition_fields = ("transition_id", "source_tile", "destination_tile", "token", "slot", "payload_bytes", "send_idma_duration_cycles", "receiver_visibility_wait_cycles")
+    transition_fields = ("transition_id", "source_tile", "destination_tile", "token", "slot", "payload_bytes", "send_start_cycle", "send_end_cycle", "send_idma_duration_cycles", "receiver_wait_start_cycle", "receiver_visible_cycle", "receiver_visibility_wait_cycles")
     with (args.output / "transitions.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=transition_fields)
         writer.writeheader()
         writer.writerows(transition_rows.values())
+    if execution_plan := getattr(args, "execution_plan", None):
+        stage_maxima(execution_plan, operation_rows, transition_rows, args.output)
+
+
+def stage_maxima(
+    execution_plan: Path,
+    operation_rows: dict[int, list[dict[str, object]]],
+    transition_rows: dict[tuple[int, int, int, int, int], dict[str, object]],
+    output: Path,
+) -> None:
+    plan = json.loads(execution_plan.read_text(encoding="utf-8"))
+    tile_stage = {
+        tile: stage_id
+        for stage_id, stage in enumerate(plan["stages"])
+        for tile in stage["submesh"]["tile_ids"]
+    }
+    kernels: dict[tuple[object, ...], int] = {}
+    for tile, rows_for_tile in operation_rows.items():
+        stage_id = tile_stage.get(tile)
+        for row in rows_for_tile:
+            key = (stage_id, row["token"], "kernel", row["operation_index"], row["operation_kind"])
+            kernels[key] = max(kernels.get(key, 0), int(row["duration_cycles"]))
+    transitions: dict[tuple[object, ...], dict[str, int | str]] = {}
+    for row in transition_rows.values():
+        key = (row["token"], row["transition_id"], tile_stage.get(int(row["source_tile"])),
+               tile_stage.get(int(row["destination_tile"])))
+        summary = transitions.setdefault(key, {
+            "max_send_idma_duration_cycles": "",
+            "max_receiver_visibility_wait_cycles": "",
+        })
+        if row["send_idma_duration_cycles"] != "":
+            previous = summary["max_send_idma_duration_cycles"]
+            summary["max_send_idma_duration_cycles"] = max(int(previous or 0), int(row["send_idma_duration_cycles"]))
+        if row["receiver_visibility_wait_cycles"] != "":
+            previous = summary["max_receiver_visibility_wait_cycles"]
+            summary["max_receiver_visibility_wait_cycles"] = max(int(previous or 0), int(row["receiver_visibility_wait_cycles"]))
+    fields = ("row_kind", "token", "stage_id", "source_stage_id", "destination_stage_id",
+              "operation_index", "operation_kind", "transition_id",
+              "max_duration_cycles", "max_send_idma_duration_cycles",
+              "max_receiver_visibility_wait_cycles")
+    with (output / "stage-maxima.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for (stage_id, token, _, item_id, operation_kind), duration in sorted(kernels.items()):
+            writer.writerow({"row_kind": "kernel", "token": token, "stage_id": stage_id,
+                             "operation_index": item_id, "operation_kind": operation_kind,
+                             "max_duration_cycles": duration})
+        for (token, transition_id, source_stage_id, destination_stage_id), summary in sorted(transitions.items()):
+            writer.writerow({"row_kind": "transition", "token": token,
+                             "source_stage_id": source_stage_id,
+                             "destination_stage_id": destination_stage_id,
+                             "transition_id": transition_id, **summary})
 
 
 def parser() -> argparse.ArgumentParser:
@@ -393,6 +454,7 @@ def parser() -> argparse.ArgumentParser:
     timings_parser.add_argument("--maps-log", type=Path, required=True)
     timings_parser.add_argument("--application", type=Path, required=True)
     timings_parser.add_argument("--output", type=Path, required=True)
+    timings_parser.add_argument("--execution-plan", type=Path)
     timings_parser.set_defaults(function=timings)
     return root
 
