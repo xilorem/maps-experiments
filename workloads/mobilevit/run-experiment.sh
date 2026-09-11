@@ -8,8 +8,17 @@ usage() {
 tokens=2
 token_slots=2
 maps_timings="${MAPS_TIMINGS:-0}"
+maps_imiss_trace="${MAPS_IMISS_TRACE:-0}"
 if [[ "$maps_timings" != 0 && "$maps_timings" != 1 ]]; then
   echo "MAPS_TIMINGS must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$maps_imiss_trace" != 0 && "$maps_imiss_trace" != 1 ]]; then
+  echo "MAPS_IMISS_TRACE must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$maps_imiss_trace" == 1 && "$maps_timings" != 1 ]]; then
+  echo "MAPS_IMISS_TRACE requires MAPS_TIMINGS=1" >&2
   exit 2
 fi
 while (($#)); do
@@ -71,7 +80,8 @@ mkdir -p "$prepared"
 input_name="$(<"$prepared/input-name.txt")"
 
 # MESH_SIZES is used for focused development runs; an ordinary experiment runs all three.
-for tiles in ${MESH_SIZES:-4}; do
+mesh_sizes="${MESH_SIZES:-4 8}"
+for tiles in $mesh_sizes; do
   mesh="${tiles}x${tiles}"
   mesh_root="$run_root/$mesh"
   application="$mesh_root/maps-application"
@@ -79,6 +89,7 @@ for tiles in ${MESH_SIZES:-4}; do
   maps_log="$mesh_root/maps.log"
   full_mesh_log="$mesh_root/full-mesh.log"
   build_log="$mesh_root/build.log"
+  execution_plan="$mesh_root/execution-plan.json"
 
   mkdir -p "$mesh_root"
 
@@ -91,12 +102,18 @@ for tiles in ${MESH_SIZES:-4}; do
     INPUT="$input_name=$prepared/inputs.bin" \
     APPLICATION="$application" 2>&1 | tee -a "$build_log"
 
+  make -C "$maps_root" plan \
+    MODEL="$model" \
+    TARGET=magia-v3 \
+    MESH="$mesh" \
+    TOKEN_SLOTS="$token_slots" \
+    EXECUTION_PLAN="$execution_plan" 2>&1 | tee -a "$build_log"
+
   if ((maps_timings)); then
     cat >>"$application/CMakeLists.txt" <<'EOF'
 
 # Experiment-only detailed timing trace for this generated MAPS application.
 target_compile_definitions(maps_mobilevit_slice PRIVATE
-  MAPS_ENABLE_TRACE=1
   MAPS_EXPERIMENT_TRACE=1
 )
 EOF
@@ -141,10 +158,35 @@ EOF
     --reference-available "$prepared/reference-available.txt" \
     --csv "$csv"
   if ((maps_timings)); then
+    imiss_args=()
+    if ((maps_imiss_trace)); then
+      imiss_work="$mesh_root/imiss-gvsoc"
+      mkdir -p "$imiss_work"
+      "$sdk_root/gvsoc/install/bin/gvrun" \
+        --target magia_v3 \
+        --param binary="$sdk_build/bin/maps_mobilevit_slice" \
+        --work-dir "$imiss_work" \
+        --attr "magia_v3/n_tiles_x=$tiles" \
+        --attr "magia_v3/n_tiles_y=$tiles" \
+        --attr "magia_v3/spatz_romfile=$sdk_build/bin/bootrom/spatz_init.bin" \
+        --trace-level=trace \
+        --trace=kill-module \
+        --vcd \
+        '--event=.*snitch-spatz/event_imiss' \
+        run | tee "$mesh_root/imiss.log"
+      imiss_args=(--imiss-vcd "$imiss_work/all.vcd")
+    fi
     "$python" "$experiment_root/results.py" timings \
       --maps-log "$maps_log" \
       --application "$application" \
+      --execution-plan "$execution_plan" \
       --output "$mesh_root/maps-timings"
+    "$python" "$experiment_root/calibration.py" \
+      --mesh "$mesh" \
+      --maps-log "$maps_log" \
+      --application "$application" \
+      "${imiss_args[@]}" \
+      --output "$mesh_root/calibration.csv"
   fi
 done
 
