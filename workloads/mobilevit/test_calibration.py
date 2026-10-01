@@ -52,7 +52,7 @@ def test_calibration_uses_warm_measurements_and_predicts_cycles(tmp_path: Path) 
     assert rows[0]["token"] == 1
     assert rows[0]["operation_kind"] == "OP_RELU"
     assert rows[0]["operation_count"] == 8192
-    assert rows[0]["predicted_cycles"] == 3807
+    assert rows[0]["predicted_cycles"] == 2412
 
 
 def test_calibration_accepts_eight_by_eight_measurements(tmp_path: Path) -> None:
@@ -75,6 +75,8 @@ $upscope $end
 $scope module magia-tile-0 $end
 $scope module tile-0-snitch-spatz $end
 $var wire 1 i event_imiss $end
+$var wire 1 r event_instr $end
+$var wire 1 x irq_exit $end
 $upscope $end
 $upscope $end
 $upscope $end
@@ -82,10 +84,16 @@ $enddefinitions $end
 #0
 b101 p
 0i
+#110
+1r
+#115
+0r
 #125
 1i
 #175
 0i
+#180
+1x
 """,
         encoding="utf-8",
     )
@@ -93,8 +101,9 @@ b101 p
     rows = calibration.calibration_rows("8x8", application, log, vcd)
 
     assert rows[0]["raw_measured_cycles"] == 3815
+    assert rows[0]["launch_cycles"] == 3801
     assert rows[0]["instruction_fetch_cycles"] == 10
-    assert rows[0]["measured_cycles"] == 3805
+    assert rows[0]["measured_cycles"] == 4
     assert rows[0]["dominance"] == "compute"
 
 
@@ -109,7 +118,7 @@ b101 p
                 (64, 128, 32, 1),
                 0,
             ),
-            86_201,
+            82_119,
         ),
         (
             calibration.Operation(
@@ -119,7 +128,7 @@ b101 p
                 (),
                 0,
             ),
-            7_013,
+            4_522,
         ),
         (
             calibration.Operation(
@@ -129,7 +138,7 @@ b101 p
                 (3,),
                 0,
             ),
-            2_668,
+            738,
         ),
     ),
 )
@@ -143,10 +152,10 @@ def test_predictor_uses_shape_aware_compute_formulas(
 @pytest.mark.parametrize(
     ("kind", "row_len", "expected"),
     (
-        ("OP_SUB", 2, 2_896),
-        ("OP_SUB", 3, 4_544),
-        ("OP_DIV", 2, 3_208),
-        ("OP_DIV", 3, 4_901),
+        ("OP_SUB", 2, 111),
+        ("OP_SUB", 3, 1_773),
+        ("OP_DIV", 2, 111),
+        ("OP_DIV", 3, 1_792),
     ),
 )
 def test_predictor_models_odd_binary_row_scalar_fallback(

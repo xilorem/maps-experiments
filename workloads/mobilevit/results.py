@@ -44,7 +44,8 @@ MAPS_CHECKSUM = re.compile(
 )
 MAPS_DURATION = re.compile(
     r"^maps t(?P<tile>\d+) tok (?P<token>\d+) slot (?P<slot>\d+) "
-    r"(?P<phase>op|send|recv) (?P<index>\d+)(?: start (?P<start>\d+) end (?P<end>\d+))? cycles (?P<cycles>\d+)$",
+    r"(?P<phase>op|send|recv|l2-read|l2-write|token|run) (?P<index>\d+)"
+    r"(?: start (?P<start>\d+) end (?P<end>\d+))? cycles (?P<cycles>\d+)$",
     re.MULTILINE,
 )
 
@@ -319,12 +320,22 @@ def generated_tile_plans(application: Path) -> tuple[
 
 def timings(args: argparse.Namespace) -> None:
     operation_kinds, sends, receivers = generated_tile_plans(args.application)
-    events = [match.groupdict() for match in MAPS_DURATION.finditer(args.maps_log.read_text(encoding="utf-8"))]
+    log = args.maps_log.read_text(encoding="utf-8")
+    events = [match.groupdict() for match in MAPS_DURATION.finditer(log)]
     if not events:
         raise ValueError("MAPS log contains no detailed timing trace")
+    token_windows = {
+        (int(tile), int(token)): (int(start), int(end))
+        for tile, token, start, end, _ in MAPS_TOKEN.findall(log)
+    }
+    last_token_by_tile = {
+        tile: max(token for event_tile, token in token_windows if event_tile == tile)
+        for tile, _ in token_windows
+    }
     args.output.mkdir(parents=True, exist_ok=True)
     operation_rows = {}
     transition_rows = {}
+    send_rows = {}
     for event in events:
         tile = int(event["tile"])
         token = int(event["token"])
@@ -333,6 +344,8 @@ def timings(args: argparse.Namespace) -> None:
         cycles = int(event["cycles"])
         start = event["start"] or ""
         end = event["end"] or ""
+        if event["phase"] in ("l2-read", "l2-write", "token", "run"):
+            continue
         if event["phase"] == "op":
             operation_rows.setdefault(tile, []).append({
                 "tile": tile, "token": token, "slot": slot, "operation_index": index,
@@ -341,6 +354,13 @@ def timings(args: argparse.Namespace) -> None:
             })
             continue
         if event["phase"] == "send":
+            send_rows.setdefault(tile, []).append({
+                "tile": tile,
+                "token": token,
+                "slot": slot,
+                "transition_id": index,
+                "duration_cycles": cycles,
+            })
             for (source, transition, destination), payload_bytes in sends.items():
                 if (source, transition) != (tile, index):
                     continue
@@ -354,7 +374,19 @@ def timings(args: argparse.Namespace) -> None:
                 row["send_start_cycle"] = start
                 row["send_end_cycle"] = end
         else:
-            source = receivers.get((tile, index), 0)
+            source = receivers.get((tile, index))
+            if source is None:
+                # Older buffered SDK traces labeled L2 and run timings as
+                # "recv". They have no matching receive descriptor.
+                continue
+            if start and end and (tile, token) in token_windows:
+                token_start, token_end = token_windows[tile, token]
+                if index == token and int(start) <= token_start and int(end) >= token_end:
+                    continue
+                last_token = last_token_by_tile[tile]
+                last_end = token_windows[tile, last_token][1]
+                if token == 0 and index == last_token + 1 and int(start) <= token_start and int(end) >= last_end:
+                    continue
             payload_bytes = sends.get((source, index, tile), 0)
             destination = tile
             row = transition_rows.setdefault((index, source, destination, token, slot), {
@@ -379,6 +411,7 @@ def timings(args: argparse.Namespace) -> None:
         writer.writerows(transition_rows.values())
     if execution_plan := getattr(args, "execution_plan", None):
         stage_maxima(execution_plan, operation_rows, transition_rows, args.output)
+        stage_totals(execution_plan, operation_rows, send_rows, args.output)
 
 
 def stage_maxima(
@@ -429,6 +462,75 @@ def stage_maxima(
                              "source_stage_id": source_stage_id,
                              "destination_stage_id": destination_stage_id,
                              "transition_id": transition_id, **summary})
+
+
+def stage_totals(
+    execution_plan: Path,
+    operation_rows: dict[int, list[dict[str, object]]],
+    send_rows: dict[int, list[dict[str, object]]],
+    output: Path,
+) -> None:
+    """Write per-stage compute and transition totals for each stage's worst tile."""
+    plan = json.loads(execution_plan.read_text(encoding="utf-8"))
+    compute: dict[tuple[int, int], tuple[int, int]] = {}
+    for tile, rows_for_tile in operation_rows.items():
+        for row in rows_for_tile:
+            key = (tile, int(row["token"]))
+            cycles, count = compute.get(key, (0, 0))
+            compute[key] = (cycles + int(row["duration_cycles"]), count + 1)
+
+    writes: dict[tuple[int, int], tuple[int, int]] = {}
+    for tile, rows_for_tile in send_rows.items():
+        for row in rows_for_tile:
+            key = (tile, int(row["token"]))
+            cycles, count = writes.get(key, (0, 0))
+            writes[key] = (cycles + int(row["duration_cycles"]), count + 1)
+
+    tokens = sorted({token for _, token in compute} | {token for _, token in writes})
+    fields = (
+        "token",
+        "stage_id",
+        "worst_compute_tile",
+        "compute_cycles",
+        "operation_count",
+        "worst_transition_tile",
+        "transition_cycles",
+        "write_count",
+    )
+    with (output / "stage-totals.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for token in tokens:
+            for stage_id, stage in enumerate(plan["stages"]):
+                tiles = [int(tile) for tile in stage["submesh"]["tile_ids"]]
+                if not tiles:
+                    raise ValueError(f"stage {stage_id} has no tiles")
+                compute_tile = max(
+                    tiles,
+                    key=lambda tile: (compute.get((tile, token), (0, 0))[0], -tile),
+                )
+                transition_tile = max(
+                    tiles,
+                    key=lambda tile: (writes.get((tile, token), (0, 0))[0], -tile),
+                )
+                compute_cycles, operation_count = compute.get(
+                    (compute_tile, token), (0, 0)
+                )
+                transition_cycles, write_count = writes.get(
+                    (transition_tile, token), (0, 0)
+                )
+                writer.writerow({
+                    "token": token,
+                    "stage_id": stage_id,
+                    "worst_compute_tile": compute_tile,
+                    "compute_cycles": compute_cycles,
+                    "operation_count": operation_count,
+                    "worst_transition_tile": transition_tile,
+                    "transition_cycles": transition_cycles,
+                    "write_count": write_count,
+                })
 
 
 def parser() -> argparse.ArgumentParser:

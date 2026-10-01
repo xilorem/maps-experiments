@@ -9,6 +9,7 @@ tokens=2
 token_slots=2
 maps_timings="${MAPS_TIMINGS:-0}"
 maps_imiss_trace="${MAPS_IMISS_TRACE:-0}"
+communication_weight="${COMMUNICATION_WEIGHT:-1.0}"
 if [[ "$maps_timings" != 0 && "$maps_timings" != 1 ]]; then
   echo "MAPS_TIMINGS must be 0 or 1" >&2
   exit 2
@@ -41,6 +42,8 @@ while (($#)); do
     ;;
   esac
 done
+
+printf 'MobileViT run: execution tokens=%s, token slots=%s\n' "$tokens" "$token_slots"
 
 experiment_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$experiment_root/../.." && pwd)"
@@ -79,8 +82,8 @@ mkdir -p "$prepared"
   --output "$prepared"
 input_name="$(<"$prepared/input-name.txt")"
 
-# MESH_SIZES is used for focused development runs; an ordinary experiment runs all three.
-mesh_sizes="${MESH_SIZES:-4 8}"
+# Override MESH_SIZES to choose the mesh sizes for this experiment.
+mesh_sizes="${MESH_SIZES:-32}"
 for tiles in $mesh_sizes; do
   mesh="${tiles}x${tiles}"
   mesh_root="$run_root/$mesh"
@@ -98,16 +101,11 @@ for tiles in $mesh_sizes; do
     TARGET=magia-v3 \
     MESH="$mesh" \
     TOKEN_SLOTS="$token_slots" \
+    COMMUNICATION_WEIGHT="$communication_weight" \
     NAME=maps_mobilevit_slice \
     INPUT="$input_name=$prepared/inputs.bin" \
+    EXECUTION_PLAN="$execution_plan" \
     APPLICATION="$application" 2>&1 | tee -a "$build_log"
-
-  make -C "$maps_root" plan \
-    MODEL="$model" \
-    TARGET=magia-v3 \
-    MESH="$mesh" \
-    TOKEN_SLOTS="$token_slots" \
-    EXECUTION_PLAN="$execution_plan" 2>&1 | tee -a "$build_log"
 
   if ((maps_timings)); then
     cat >>"$application/CMakeLists.txt" <<'EOF'
@@ -172,9 +170,10 @@ EOF
         --trace-level=trace \
         --trace=kill-module \
         --vcd \
+        '--event=.*snitch-spatz/event_instr' \
         '--event=.*snitch-spatz/event_imiss' \
         run | tee "$mesh_root/imiss.log"
-      imiss_args=(--imiss-vcd "$imiss_work/all.vcd")
+      imiss_args=(--trace-vcd "$imiss_work/all.vcd")
     fi
     "$python" "$experiment_root/results.py" timings \
       --maps-log "$maps_log" \

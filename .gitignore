@@ -5,3 +5,6 @@ build/
 workloads/*/.build/
 workloads/*/results/*
 !workloads/*/results/.gitkeep
+
+# Generated build artifacts from older experiment runners.
+/results/

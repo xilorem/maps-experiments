@@ -1,0 +1,20 @@
+{
+  "runs": {
+    "baseline": "20261001T075754.896863025Z",
+    "new": "20261001T080104.265227388Z"
+  },
+  "mesh": "8x8",
+  "tokens": 4,
+  "token_slots": 2,
+  "maps_timings": 1,
+  "communication_weight": 1,
+  "stage_latency_weight": 1,
+  "simulator": "/home/ivan/repos/magia-sdk-v3",
+  "maps_baseline_head": "f10f7a7b6656bf61f7d4cdd62d792931c93a11b5",
+  "experiment_head": "2d31affc2017096200ac95615036aeb1a3a88cbc",
+  "maps/target/magia_v3/mesh.py_sha256": "32d928d65db0d5c88d6ca15b94dc7603a34041da16ec4a8b064b68dafa847415",
+  "maps/planning/transitions/dma.py_sha256": "894139a03dab4f881d687ed68728565049f5434c238fda8dcc24f13c34a48b7f",
+  "maps/planning/stage_latency.py_sha256": "1cc5a04fedc5d322517c2a99d7ceb62fd8332d2572b70fec57803b592a609a05",
+  "sdk_head": "8c878602d5a9c98ec68216cef5f1501200e52b75",
+  "sdk_dirty_diff_sha256": "b6119b9caa9dd720ae628c7a519ff13075aee0411911064d89306d379abe7f8f"
+}
