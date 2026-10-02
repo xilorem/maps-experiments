@@ -1,0 +1,6 @@
+    .section .l2_bulk, "a", @progbits
+    .globl mobilevit_data
+    .balign 4
+mobilevit_data:
+    .incbin "@MVIT_DATA@"
+    .size mobilevit_data, . - mobilevit_data

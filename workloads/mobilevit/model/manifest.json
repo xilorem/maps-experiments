@@ -1,0 +1,22 @@
+{
+  "tokens": 16,
+  "seed": 20260729,
+  "input_shape": [
+    1,
+    3,
+    256,
+    256
+  ],
+  "output_shape": [
+    1,
+    1000
+  ],
+  "references": "FP32 ONNX Runtime CPU outputs rounded to FP16",
+  "sha256": {
+    "mobilevitv2_050.cvnets_in1k.bs1.simplified.wfold.noexpand.gn.convfold.single_output.onnx": "0a0599ba394c9b653f4c90e759ce360c5c56292aaabb07b1b07072b1f7beb692",
+    "mobilevit_data.bin": "6aaae4c29293d82d796d36d8d139c720531ac769abdd9bc67eed2fe36f4cb86e",
+    "mobilevit_graph.h": "4aff128b0d566dc4be49f1b1832a0a436c8436047979fe200e0105fdf1d5c503",
+    "inputs.bin": "19f7c692d10ef4bd02a36714945df0d4fe8e41ca07739dd4900d3aa9e3326970",
+    "references.bin": "d0868c1e04be7269ea73e06a61b4693eeaf6574ccf5f8eac4ab523d133e6b7a3"
+  }
+}

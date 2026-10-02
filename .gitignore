@@ -8,3 +8,6 @@ workloads/*/results/*
 
 # Generated build artifacts from older experiment runners.
 /results/
+
+# Regenerable per-layer full MobileViT golden tensors.
+workloads/mobilevit/model/layers/

@@ -6,7 +6,9 @@ results.
 ## Workloads
 
 - [MobileViT](workloads/mobilevit/README.md): compare pipelined MAPS execution with the
-  SDK's sequential full-mesh test on 4x4, 8x8, and 16x16 MAGIA-v3 meshes.
+  sequential full-mesh reference on a 32×32 MAGIA-v3 mesh.
+- [MobileViT nodes 170–179](workloads/mobilevit_170-179/README.md): the smaller FP16
+  slice experiment and its preserved allocation studies.
 
 ## Setup
 
