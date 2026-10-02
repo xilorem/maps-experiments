@@ -1,0 +1,230 @@
+--- a/maps/planning/allocation/candidates.py
++++ b/maps/planning/allocation/candidates.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++from functools import cached_property
+ from typing import cast
+ 
+ from maps.hardware import Mesh, Tile, WorkSignature
+@@ -601,12 +602,21 @@
+ 
+         return len(self.tile_ids)
+ 
+-    @property
++    @cached_property
+     def tiles(self) -> tuple[Tile, ...]:
+         """Resolve tile ids to mesh tile objects in logical order."""
+ 
+         return tuple(self.mesh.tile_by_id(tile_id) for tile_id in self.tile_ids)
+ 
++    @cached_property
++    def _tile_ordinals(self) -> dict[int, int]:
++        return {tile_id: ordinal for ordinal, tile_id in enumerate(self.tile_ids)}
++
++    def tile_ordinal(self, tile_id: int) -> int:
++        """Return one tile's ordinal in the logical ownership order."""
++
++        return self._tile_ordinals[tile_id]
++
+     @property
+     def tile_mask(self) -> int:
+         """Return a bit mask with one bit per physical tile id."""
+@@ -631,7 +641,7 @@
+ 
+         if tile_id not in self.tile_ids:
+             raise ValueError(f"tile_id {tile_id} is not inside submesh {self.submesh_id}")
+-        ordinal = self.tile_ids.index(tile_id)
++        ordinal = self.tile_ordinal(tile_id)
+         return ordinal % self.width, ordinal // self.width
+ 
+     def local_to_global(self, local_x: int, local_y: int) -> int:
+--- a/maps/planning/allocation/selection.py
++++ b/maps/planning/allocation/selection.py
+@@ -56,6 +56,26 @@
+     return candidates
+ 
+ 
++def candidate_tile_counts(current: int, budget: int) -> tuple[int, ...]:
++    """Probe coarse counts and their neighbors, then refine around the current size.
++
++    A linear sweep spends most analysis on large unused allocations. Powers of
++    two cross non-monotone regions, while adjacent counts refine a useful
++    allocation and permit one-tile growth or removal. Endpoints retain the
++    minimum and maximum budget choices. This is O(log budget) per sweep.
++    """
++
++    counts = {
++        1, budget, current - 1, current, current + 1,
++        current // 2, current * 2,
++    }
++    count = 1
++    while count <= budget:
++        counts.update((count - 1, count, count + 1))
++        count *= 2
++    return tuple(sorted(count for count in counts if 1 <= count <= budget))
++
++
+ def grow_stage_candidates(
+     context: AllocationContext,
+     mesh: Mesh,
+@@ -67,7 +87,8 @@
+ ) -> tuple[dict[int, StageCandidate], SelectionEvaluation]:
+     """Best-improvement local search over counts, layouts, and tile exchanges.
+ 
+-    All feasible single-stage replacements are considered, including shrinking
++    Counts are explored with logarithmic coarse probes and local refinement;
++    every feasible layout at those counts is considered, including shrinking
+     and same-count layout changes. Exchanges transfer a donor's released tiles
+     to another stage atomically, so a full mesh can escape an overgrown stage.
+     Stage formation stays fixed. Strict objective descent guarantees termination;
+@@ -99,11 +120,18 @@
+         return selection_objective(evaluation.metrics), _used_tile_count(selection)
+ 
+     current_evaluation = evaluate(selected_candidates)
++    sweep = 0
+     while True:
++        sweep += 1
+         used_tiles = _used_tile_count(selected_candidates)
+         best_selection = selected_candidates
+         best_evaluation = current_evaluation
+         best_objective = objective(best_selection, best_evaluation)
++        _debug(
++            debug,
++            f"[allocation] sweep={sweep} objective={best_objective} "
++            f"used_tiles={used_tiles}/{mesh.num_tiles}",
++        )
+ 
+         def consider(replacements: dict[int, StageCandidate]) -> None:
+             nonlocal best_selection, best_evaluation, best_objective
+@@ -115,13 +143,16 @@
+ 
+         for stage, current in selected_candidates.items():
+             budget = mesh.num_tiles - used_tiles + current.plan.tile_count
+-            for count in range(1, budget + 1):
++            counts = candidate_tile_counts(current.plan.tile_count, budget)
++            _debug(debug, f"[allocation] sweep={sweep} stage={stage} tile_counts={counts}")
++            for count in counts:
+                 for candidate in analyzer.candidates(stage, count):
+                     if candidate is not current:
+                         consider({stage: candidate})
+ 
++        _debug(debug, f"[allocation] sweep={sweep} phase=tile_exchanges")
+         for donor, current in selected_candidates.items():
+-            for count in range(1, current.plan.tile_count):
++            for count in candidate_tile_counts(current.plan.tile_count, current.plan.tile_count - 1):
+                 released = current.plan.tile_count - count
+                 for recipient, recipient_current in selected_candidates.items():
+                     if recipient == donor:
+@@ -210,7 +241,7 @@
+     """Print one allocation trace line when diagnostics are enabled."""
+ 
+     if enabled:
+-        print(message)
++        print(message, flush=True)
+ 
+ 
+ def _format_metrics(metrics: dict[int, float]) -> str:
+--- a/maps/planning/mapping.py
++++ b/maps/planning/mapping.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++from functools import cached_property
+ from enum import IntEnum
+ 
+ from maps.graph import TENSOR_MAX_DIMS, Tensor
+@@ -257,8 +258,7 @@
+ 
+     logical_width = layout.effective_logical_width
+     logical_height = layout.effective_logical_height
+-    tile_ids = tuple(candidate.tile_id for candidate in layout.submesh.tiles)
+-    tile_ordinal = tile_ids.index(tile.tile_id)
++    tile_ordinal = layout.submesh.tile_ordinal(tile.tile_id)
+     logical_x = tile_ordinal % logical_width
+     logical_y = tile_ordinal // logical_width
+     dims = [TensorRange(start=0, length=dim) for dim in tensor.dims]
+@@ -369,7 +369,7 @@
+         """Return the number of tiles covered by this submesh."""
+         return len(self.tile_ids)
+ 
+-    @property
++    @cached_property
+     def tiles(self) -> tuple[Tile, ...]:
+         """Return mesh tiles covered by this submesh in row-major order."""
+         return tuple(
+@@ -383,6 +383,15 @@
+             )
+         )
+ 
++    @cached_property
++    def _tile_ordinals(self) -> dict[int, int]:
++        return {tile.tile_id: ordinal for ordinal, tile in enumerate(self.tiles)}
++
++    def tile_ordinal(self, tile_id: int) -> int:
++        """Return one tile's ordinal in row-major ownership order."""
++
++        return self._tile_ordinals[tile_id]
++
+     @property
+     def tile_mask(self) -> int:
+         """Return a bit mask for fast overlap checks."""
+--- a/tests/planning/test_allocation.py
++++ b/tests/planning/test_allocation.py
+@@ -952,3 +952,54 @@
+         context, mesh, {0: analyzer.candidate(0, 3)}, analyzer, 1, 1, False,
+     )
+     assert selected[0].plan.tile_count == 1
++
++
++@pytest.mark.parametrize("physical", (False, True))
++def test_slice_lookup_does_not_resolve_the_whole_submesh_per_tile(
++    monkeypatch, physical: bool,
++) -> None:
++    from maps.planning.allocation.candidates import representative_connected_submesh
++    from maps.planning.mapping import tile_tensor_slice
++
++    mesh = _mesh_with_l1(4, 4, l1_size=32768)
++    submesh = (
++        Submesh(mesh, 0, tile_ids=frozenset(range(16)))
++        if physical else representative_connected_submesh(mesh, 0, 16)
++    )
++    node = _gemm_node("slice_lookup", 16, 16, 16)
++    layout = node.payload.output_layouts(submesh, logical_shape=(4, 4))[0]
++    tiles = submesh.tiles
++    original = Mesh.tile_by_id
++    calls = 0
++
++    def counted(self, tile_id):
++        nonlocal calls
++        calls += 1
++        return original(self, tile_id)
++
++    monkeypatch.setattr(Mesh, "tile_by_id", counted)
++    for tile in tiles:
++        tile_tensor_slice(node.outputs[0], layout, tile)
++    assert calls <= len(tiles)
++
++
++def test_large_mesh_probes_a_logarithmic_count_neighborhood(monkeypatch) -> None:
++    node, initializer = _plateau_node("count_search", 10, 10)
++    graph = Graph("count_search", nodes=(node,), initializers=(initializer,))
++    mesh = _mesh_with_l1(16, 16, l1_size=4096)
++    context = allocation_module.build_allocation_context(graph, {0: (node,)})
++    analyzer = StageCandidateAnalyzer(context.stage_formation, mesh, frozenset(graph.initializers))
++    seed = analyzer.candidate(0, 1)
++    probed = []
++
++    def candidates(stage, count):
++        probed.append(count)
++        return (seed,) if count == 1 else ()
++
++    monkeypatch.setattr(analyzer, "candidates", candidates)
++    selected, _ = allocation_module.grow_stage_candidates(
++        context, mesh, {0: seed}, analyzer, 1, 1, False,
++    )
++    assert selected[0] is seed
++    assert {1, 2, 3, 4, 8, 16, 32, 64, 128, 256} <= set(probed)
++    assert len(probed) <= 3 * mesh.num_tiles.bit_length() + 4

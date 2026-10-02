@@ -1,0 +1,110 @@
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224666 (python3) total-vm:4257284kB, anon-rss:4180816kB, file-rss:10880kB, shmem-rss:0kB, UID:1000 pgtables:8376kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Tasks in /user.slice/user-1000.slice/user@1000.service/app.slice/mobilevit32-safe-resume-20261001.service are going to be killed due to memory.oom.group set
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224627 (bash) total-vm:4756kB, anon-rss:256kB, file-rss:2944kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224629 (make) total-vm:3496kB, anon-rss:256kB, file-rss:2048kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224630 (tee) total-vm:3136kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224641 (make) total-vm:3496kB, anon-rss:256kB, file-rss:2176kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224664 (sh) total-vm:2804kB, anon-rss:0kB, file-rss:1664kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224665 (cmake) total-vm:72432kB, anon-rss:2304kB, file-rss:15616kB, shmem-rss:0kB, UID:1000 pgtables:136kB oom_score_adj:200
+[Thu Oct  1 11:16:26 2026] Memory cgroup out of memory: Killed process 224666 (python3) total-vm:4257284kB, anon-rss:4180816kB, file-rss:10880kB, shmem-rss:0kB, UID:1000 pgtables:8376kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=200
+[Thu Oct  1 11:25:23 2026] CPU: 4 PID: 227716 Comm: python3 Not tainted 6.6.87.2-microsoft-standard-WSL2 #1
+[Thu Oct  1 11:25:23 2026] Call Trace:
+[Thu Oct  1 11:25:23 2026]  <TASK>
+[Thu Oct  1 11:25:23 2026]  dump_stack_lvl+0x4c/0x70
+[Thu Oct  1 11:25:23 2026]  dump_stack+0x14/0x20
+[Thu Oct  1 11:25:23 2026]  dump_header+0x51/0x260
+[Thu Oct  1 11:25:23 2026]  oom_kill_process+0x100/0x1a0
+[Thu Oct  1 11:25:23 2026]  out_of_memory+0x11d/0x560
+[Thu Oct  1 11:25:23 2026]  mem_cgroup_out_of_memory+0x13b/0x150
+[Thu Oct  1 11:25:23 2026]  try_charge_memcg+0x76b/0x830
+[Thu Oct  1 11:25:23 2026]  charge_memcg+0x35/0xb0
+[Thu Oct  1 11:25:23 2026]  __mem_cgroup_charge+0x31/0x90
+[Thu Oct  1 11:25:23 2026]  do_anonymous_page+0x98/0x420
+[Thu Oct  1 11:25:23 2026]  __handle_mm_fault+0x818/0x840
+[Thu Oct  1 11:25:23 2026]  handle_mm_fault+0xc7/0x2f0
+[Thu Oct  1 11:25:23 2026]  do_user_addr_fault+0x188/0x660
+[Thu Oct  1 11:25:23 2026]  exc_page_fault+0x73/0x160
+[Thu Oct  1 11:25:23 2026]  asm_exc_page_fault+0x2b/0x30
+[Thu Oct  1 11:25:23 2026] RIP: 0033:0x64729ffdb6f5
+[Thu Oct  1 11:25:23 2026] Code: 8b 40 18 49 89 42 18 4c 89 50 10 e9 39 ff ff ff 0f 1f 44 00 00 ff c6 45 89 c8 c1 e6 04 49 01 c0 44 01 ce 4c 89 40 08 89 70 28 <49> c7 00 00 00 00 00 81 e1 00 40 00 00 49 89 c8 e9 0a ff ff ff 66
+[Thu Oct  1 11:25:23 2026] RSP: 002b:00007fff977271e0 EFLAGS: 00010202
+[Thu Oct  1 11:25:23 2026] RAX: 00007c837c744000 RBX: 00006472b7d665f0 RCX: 000000000000561c
+[Thu Oct  1 11:25:23 2026] RDX: 0000000000000030 RSI: 0000000000001070 RDI: 00007c837c744fd0
+[Thu Oct  1 11:25:23 2026] RBP: 0000000000000020 R08: 00007c837c745020 R09: 0000000000001020
+[Thu Oct  1 11:25:23 2026] R10: 00006472a039cdb0 R11: 00006472a0338540 R12: 0000000000000050
+[Thu Oct  1 11:25:23 2026] R13: 0000000000000000 R14: 00006472a039cd80 R15: 00006472a039bd70
+[Thu Oct  1 11:25:23 2026]  </TASK>
+[Thu Oct  1 11:25:23 2026] memory: usage 6291456kB, limit 6291456kB, failcnt 99
+[Thu Oct  1 11:25:23 2026] swap: usage 0kB, limit 0kB, failcnt 0
+[Thu Oct  1 11:25:23 2026] Memory cgroup stats for /user.slice/user-1000.slice/user@1000.service/app.slice/mobilevit32-safe-6g-20261001.service:
+[Thu Oct  1 11:25:23 2026] anon 6428561408
+[Thu Oct  1 11:25:23 2026] file 0
+[Thu Oct  1 11:25:23 2026] kernel 13889536
+[Thu Oct  1 11:25:23 2026] kernel_stack 114688
+[Thu Oct  1 11:25:23 2026] pagetables 13176832
+[Thu Oct  1 11:25:23 2026] sec_pagetables 0
+[Thu Oct  1 11:25:23 2026] percpu 2048
+[Thu Oct  1 11:25:23 2026] sock 0
+[Thu Oct  1 11:25:23 2026] vmalloc 0
+[Thu Oct  1 11:25:23 2026] shmem 0
+[Thu Oct  1 11:25:23 2026] file_mapped 0
+[Thu Oct  1 11:25:23 2026] file_dirty 0
+[Thu Oct  1 11:25:23 2026] file_writeback 0
+[Thu Oct  1 11:25:23 2026] swapcached 0
+[Thu Oct  1 11:25:23 2026] anon_thp 0
+[Thu Oct  1 11:25:23 2026] file_thp 0
+[Thu Oct  1 11:25:23 2026] shmem_thp 0
+[Thu Oct  1 11:25:23 2026] inactive_anon 6428495872
+[Thu Oct  1 11:25:23 2026] active_anon 32768
+[Thu Oct  1 11:25:23 2026] inactive_file 0
+[Thu Oct  1 11:25:23 2026] active_file 0
+[Thu Oct  1 11:25:23 2026] unevictable 0
+[Thu Oct  1 11:25:23 2026] slab_reclaimable 46600
+[Thu Oct  1 11:25:23 2026] slab_unreclaimable 372952
+[Thu Oct  1 11:25:23 2026] slab 419552
+[Thu Oct  1 11:25:23 2026] workingset_refault_anon 0
+[Thu Oct  1 11:25:23 2026] workingset_refault_file 0
+[Thu Oct  1 11:25:23 2026] workingset_activate_anon 0
+[Thu Oct  1 11:25:23 2026] workingset_activate_file 0
+[Thu Oct  1 11:25:23 2026] workingset_restore_anon 0
+[Thu Oct  1 11:25:23 2026] workingset_restore_file 0
+[Thu Oct  1 11:25:23 2026] workingset_nodereclaim 0
+[Thu Oct  1 11:25:23 2026] pgscan 151
+[Thu Oct  1 11:25:23 2026] pgsteal 151
+[Thu Oct  1 11:25:23 2026] pgscan_kswapd 76
+[Thu Oct  1 11:25:23 2026] pgscan_direct 75
+[Thu Oct  1 11:25:23 2026] pgscan_khugepaged 0
+[Thu Oct  1 11:25:23 2026] pgsteal_kswapd 76
+[Thu Oct  1 11:25:23 2026] pgsteal_direct 75
+[Thu Oct  1 11:25:23 2026] pgsteal_khugepaged 0
+[Thu Oct  1 11:25:23 2026] pgfault 1585720
+[Thu Oct  1 11:25:23 2026] pgmajfault 0
+[Thu Oct  1 11:25:23 2026] pgrefill 0
+[Thu Oct  1 11:25:23 2026] pgactivate 0
+[Thu Oct  1 11:25:23 2026] pgdeactivate 0
+[Thu Oct  1 11:25:23 2026] pglazyfree 0
+[Thu Oct  1 11:25:23 2026] pglazyfreed 0
+[Thu Oct  1 11:25:23 2026] thp_fault_alloc 0
+[Thu Oct  1 11:25:23 2026] thp_collapse_alloc 0
+[Thu Oct  1 11:25:23 2026] Tasks state (memory values in pages):
+[Thu Oct  1 11:25:23 2026] [  pid  ]   uid  tgid total_vm      rss pgtables_bytes swapents oom_score_adj name
+[Thu Oct  1 11:25:23 2026] [ 227677]  1000 227677      674      352    53248        0           200 time
+[Thu Oct  1 11:25:23 2026] [ 227679]  1000 227679     1189      768    57344        0           200 bash
+[Thu Oct  1 11:25:23 2026] [ 227680]  1000 227680      874      576    49152        0           200 make
+[Thu Oct  1 11:25:23 2026] [ 227681]  1000 227681      784      384    57344        0           200 tee
+[Thu Oct  1 11:25:23 2026] [ 227692]  1000 227692      874      608    45056        0           200 make
+[Thu Oct  1 11:25:23 2026] [ 227714]  1000 227714      701      416    49152        0           200 sh
+[Thu Oct  1 11:25:23 2026] [ 227715]  1000 227715    18108     3616   131072        0           200 cmake
+[Thu Oct  1 11:25:23 2026] [ 227716]  1000 227716  1595722  1571013 12832768        0           200 python3
+[Thu Oct  1 11:25:23 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=user.slice,mems_allowed=0,oom_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/mobilevit32-safe-6g-20261001.service,task_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/mobilevit32-safe-6g-20261001.service,task=python3,pid=227716,uid=1000
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227716 (python3) total-vm:6382888kB, anon-rss:6273940kB, file-rss:10112kB, shmem-rss:0kB, UID:1000 pgtables:12532kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Tasks in /user.slice/user-1000.slice/user@1000.service/app.slice/mobilevit32-safe-6g-20261001.service are going to be killed due to memory.oom.group set
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227677 (time) total-vm:2696kB, anon-rss:0kB, file-rss:1408kB, shmem-rss:0kB, UID:1000 pgtables:52kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227679 (bash) total-vm:4756kB, anon-rss:256kB, file-rss:2816kB, shmem-rss:0kB, UID:1000 pgtables:56kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227680 (make) total-vm:3496kB, anon-rss:256kB, file-rss:2048kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227681 (tee) total-vm:3136kB, anon-rss:0kB, file-rss:1536kB, shmem-rss:0kB, UID:1000 pgtables:56kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227692 (make) total-vm:3496kB, anon-rss:256kB, file-rss:2176kB, shmem-rss:0kB, UID:1000 pgtables:44kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227714 (sh) total-vm:2804kB, anon-rss:0kB, file-rss:1664kB, shmem-rss:0kB, UID:1000 pgtables:48kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227715 (cmake) total-vm:72432kB, anon-rss:2304kB, file-rss:12160kB, shmem-rss:0kB, UID:1000 pgtables:128kB oom_score_adj:200
+[Thu Oct  1 11:25:23 2026] Memory cgroup out of memory: Killed process 227716 (python3) total-vm:6382888kB, anon-rss:6273940kB, file-rss:10112kB, shmem-rss:0kB, UID:1000 pgtables:12532kB oom_score_adj:200

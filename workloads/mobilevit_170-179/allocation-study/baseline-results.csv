@@ -1,0 +1,9 @@
+mesh,strategy,token,completion_cycle,completion_interval,active_tiles,validation_mismatches,validation_nonfinite
+8x8,maps,0,487623,,54,1,
+8x8,maps,1,561935,74312,54,1,
+8x8,maps,2,665352,103417,54,1,
+8x8,maps,3,772639,107287,54,1,
+8x8,full-mesh,0,92333,,64,2,0
+8x8,full-mesh,1,167878,75545,64,9,0
+8x8,full-mesh,2,241793,73915,64,5,0
+8x8,full-mesh,3,315594,73801,64,5,0

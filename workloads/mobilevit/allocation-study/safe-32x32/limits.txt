@@ -1,7 +1,0 @@
-RuntimeMaxUSec=20min
-Result=oom-kill
-ExecMainCode=2
-ExecMainStatus=9
-CPUQuotaPerSecUSec=2s
-MemoryMax=4294967296
-MemorySwapMax=0
