@@ -30,6 +30,10 @@ def default_sdk_root():
 
 def build_env(sdk):
     env = os.environ.copy()
+    corev = Path(env.get('COREV_ROOT', CHECKOUT_ROOT / 'toolchains/corev-toolchain'))
+    if (corev / 'bin/riscv32-corev-elf-gcc').is_file():
+        env['COREV_ROOT'] = str(corev)
+        env['PATH'] = str(corev / 'bin') + ':' + env['PATH']
     if 'LLVM_INSTALL_DIR' not in env:
         for candidate in (sdk / 'llvm/install',
                           CHECKOUT_ROOT / 'toolchains/llvm20-root/usr/lib/llvm-20',

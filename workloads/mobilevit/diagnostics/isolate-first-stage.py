@@ -253,6 +253,8 @@ def main(target='maps_mobilevit_first_stage', output_name='first-stage-4x4', mes
     parser.add_argument('--sdk-root', type=Path, default=magia_sdk.default_sdk_root())
     parser.add_argument('--output', type=Path)
     parser.add_argument('--generate-only', action='store_true')
+    parser.add_argument('--fifo-event-sleep', action='store_true',
+                        help='experimental GVSoC FIFO doorbells and receive sleep')
     parser.add_argument('--timeout', type=float, default=180,
                         help='maximum simulator wall time in seconds (default: 180)')
     parser.add_argument('--blocking-fifo', action='store_true',
@@ -264,6 +266,9 @@ def main(target='maps_mobilevit_first_stage', output_name='first-stage-4x4', mes
     output = (args.output or args.mesh_root / 'maps-gvsoc-diagnostic' / output_name).resolve()
     output.mkdir(parents=True, exist_ok=True)
     app = generate(args.mesh_root.resolve(), output)
+    if args.fifo_event_sleep:
+        with (app / 'CMakeLists.txt').open('a') as cmake:
+            cmake.write(f'\ntarget_compile_definitions({target} PRIVATE MAPS_FIFO_EVENT_SLEEP=1)\n')
     if args.blocking_fifo:
         source = (app / 'main.c').read_text()
         call = 'maps_fifo_run_tile_tokens(&plan, 2u);'
@@ -291,6 +296,8 @@ def main(target='maps_mobilevit_first_stage', output_name='first-stage-4x4', mes
     if args.dma_read_trace is not None:
         options.append(f'--trace=tile-{args.dma_read_trace}-idma-axi2obi/axi_read/trace:dma-read.log')
     command = magia_sdk.gvrun_command(args.sdk_root, build, target, work, mesh_size, options)
+    if args.fifo_event_sleep:
+        command[-1:-1] = ['--attr', 'magia_v3/fifo_events=1']
     start = time.time()
     with (output / 'maps.log').open('w') as log:
         process = subprocess.Popen(command, cwd=args.sdk_root, env=env, stdout=log,
