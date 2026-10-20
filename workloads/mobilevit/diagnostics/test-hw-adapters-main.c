@@ -26,6 +26,10 @@ int main(void) {
     idma_init(); redmule_init(); fsync_init(); eu_init();
     eu_clear_events(0xffffffffu);
     eu_fsync_init(0u); eu_idma_init(0u); eu_redmule_init(0u);
+#if MAPS_FIFO_INPLACE_RECV
+    /* This diagnostic bypasses maps_fifo_init. */
+    maps_slice_alias_reset();
+#endif
     if (hartid == 0) {
         /* Field by field: CORE-V GCC ICEs (maybe_postinc) on a zero-filled
          * designated initialiser. */
@@ -38,12 +42,14 @@ int main(void) {
         runtime.spatz_initialized=0u;
         runtime.background=0;
         runtime.background_ctx=0;
-        runtime.add_fp16_task=0u; runtime.mul_bcast_fp16_task=0u; runtime.matmul_fp16_task=0u;
+        runtime.add_fp16_task=0u; runtime.mul_bcast_fp16_task=MUL_BCAST_FP16_SPATZ_TASK; runtime.matmul_fp16_task=MATMUL_ROWS_FP16_SPATZ_TASK;
         runtime.relu_fp16_task=0u; runtime.sigmoid_fp16_task=0u;
         runtime.depthwise_conv_fp16_task=DEPTHWISE_CONV_FP16_SPATZ_TASK;
         runtime.softmax_exp_fp16_task=0u; runtime.group_reduce_fp16_task=0u;
         runtime.group_centered_reduce_fp16_task=0u; runtime.group_normalize_fp16_task=0u;
-        runtime.reducesum_fp16_task=0u; runtime.reducemax_fp16_task=0u; runtime.binary_bcast_fp16_task=0u;
+        runtime.reducesum_fp16_task=REDUCESUM_FP16_SPATZ_TASK; runtime.reducemax_fp16_task=0u; runtime.binary_bcast_fp16_task=0u;
+        runtime.transpose_fp16_task=TRANSPOSE_STRIDED_FP16_SPATZ_TASK;
+        runtime.maxpool_fp16_task=MAXPOOL2D_FP16_SPATZ_TASK;
         int init=maps_operation_runtime_init(&runtime);
         errors=init != 0;
         printf("HW_INIT code=%d cases=%u\n",init,(uint32_t)(sizeof(cases)/sizeof(cases[0])));
@@ -54,8 +60,26 @@ int main(void) {
                 for (uint32_t j=0;j<tc->op.num_inputs;++j)
                     errors += maps_idma_copy_1d_ticketed(0u,(uint32_t)tc->inputs[token][j],plan.l1_data_base+tc->slices[j].l1_offset_bytes,tc->sizes[token][j]) != 0;
                 volatile uint16_t *actual=(volatile uint16_t *)(plan.l1_data_base+tc->slices[3].l1_offset_bytes);
-                for (uint32_t i=0;i<tc->output_bytes/2;++i) actual[i]=0;
+                for (uint32_t i=0;i<tc->output_bytes/2;++i) actual[i]=tc->op.kind==OP_IM2COL ? 0x3555u : 0u;
+                const uint32_t start=maps_read_cycle();
                 int result=maps_execute_operation(&plan,&tc->op,0,&runtime);
+                const uint32_t cycles=maps_read_cycle()-start;
+#if defined(MAPS_IM2COL_PROFILE) && MAPS_IM2COL_PROFILE
+                if (tc->op.kind==OP_IM2COL) {
+                    const volatile uint32_t *profile=(const volatile uint32_t *)(get_l1_base(hartid)+0xBFF00u);
+                    printf("HW_IM2COL_PROFILE case=%u token=%u zero=%u dma=%u calls=%u bytes=%u\n",
+                        c,token,profile[0],profile[1],profile[2],profile[3]);
+
+                }
+#endif
+#if defined(MAPS_MATMUL_PROFILE) && MAPS_MATMUL_PROFILE
+                if (tc->op.kind==OP_MATMUL) {
+                    const volatile uint32_t *profile=(const volatile uint32_t *)
+                        (((uintptr_t)runtime.spatz_params+sizeof(matmul_fp16_spatz_params_t)+15u)&~(uintptr_t)15u);
+                    printf("HW_GEMM_PROFILE case=%u token=%u compute=%u bias=%u\n",c,token,profile[0],profile[1]);
+                }
+#endif
+                printf("HW_CYCLES case=%u token=%u cycles=%u\n",c,token,cycles);
                 uint32_t bad=0;
                 const uint16_t *expected=(const uint16_t *)tc->gold[token];
                 for (uint32_t i=0;i<tc->output_bytes/2;++i) {
