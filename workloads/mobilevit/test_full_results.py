@@ -61,3 +61,27 @@ def test_collector_recognizes_full_model_application_name(tmp_path):
     rows = results.shared.maps_rows(log, '32x32', 2, checksums)
     assert [r['completion_cycle'] for r in rows] == [300, 500]
     assert [r['validation_mismatches'] for r in rows] == [0, 1]
+
+
+def test_numeric_output_validation_uses_tolerance_not_checksum(tmp_path):
+    import csv
+    prepared=tmp_path/'prepared'; prepared.mkdir()
+    (prepared/'reference-available.txt').write_text('1\n')
+    (prepared/'references.bin').write_bytes(np.array([[.1,.2],[.1,.2]],dtype='<f2').tobytes())
+    checksums=prepared/'reference-checksums.csv'; checksums.write_text('0,00000000\n1,00000000\n')
+    text=('MAPS_TOKEN tile=0 token=0 start=100 end=200 output=0\n'
+          'MAPS_TOKEN tile=1 token=0 start=200 end=400 output=1\n'
+          'MAPS_TOKEN tile=0 token=1 start=210 end=310 output=0\n'
+          'MAPS_TOKEN tile=1 token=1 start=400 end=600 output=1\n'
+          'maps_mobilevit token 0 output output checksum: 12345678\n'
+          'maps_mobilevit token 1 output output checksum: abcdef02\n')
+    for token,values in enumerate(([.101,.201],[.1,float('nan')])):
+        data=np.array(values,dtype='<f2').tobytes().hex()
+        text+=f'MAPS_OUTPUT_BYTES token={token} offset=0 data={data}\n'
+    log=tmp_path/'maps.log'; log.write_text(text)
+    output=tmp_path/'results.csv'
+    results.collect_maps(Namespace(maps_log=log,mesh='32x32',tokens=2,reference_checksums=checksums,csv=output))
+    rows=list(csv.DictReader(output.open()))
+    assert [r['validation_mismatches'] for r in rows]==['0','0']
+    assert [r['validation_nonfinite'] for r in rows]==['0','1']
+    assert (tmp_path/'maps-output-token0.bin').read_bytes()==np.array([.101,.201],dtype='<f2').tobytes()

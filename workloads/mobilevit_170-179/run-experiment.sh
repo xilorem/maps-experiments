@@ -89,7 +89,7 @@ mkdir -p "$prepared"
 input_name="$(<"$prepared/input-name.txt")"
 
 # Override MESH_SIZES to choose the mesh sizes for this experiment.
-mesh_sizes="${MESH_SIZES:-32}"
+mesh_sizes="${MESH_SIZES:-4}"
 for tiles in $mesh_sizes; do
   mesh="${tiles}x${tiles}"
   mesh_root="$run_root/$mesh"

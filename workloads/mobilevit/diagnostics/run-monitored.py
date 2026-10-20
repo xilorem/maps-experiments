@@ -3,7 +3,7 @@
 
 No allocation or placement is repeated. Copies the generated application into a
 separate run directory, enables operation and token progress, and runs GVSoC's
-optimized launcher without instruction tracing. The monitor persists after its
+optimized launcher with optional instruction tracing. The monitor persists after its
 launching terminal exits. A kernel error stops only this simulator process group.
 """
 
@@ -24,6 +24,14 @@ import time
 import magia_sdk
 
 
+def tile_source(app, tile):
+    for digits in (4, 3, 2, 1):
+        path = app / f'src/tiles/tile_{tile:0{digits}d}.c'
+        if path.exists():
+            return path
+    raise FileNotFoundError(f'No generated source for tile {tile} in {app}')
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -39,7 +47,7 @@ def add_prefix_outputs(app, output, execution):
     # static in a header inline, so a tile source would get its own, empty copy.
     manifest, exporters, cases = [], [], []
     for tile in execution['stages'][-1]['submesh']['tile_ids']:
-        path = magia_sdk.tile_source(app, execution['mesh'], tile)
+        path = tile_source(app, tile)
         source = path.read_text()
         final = source.rsplit('.outputs = ', 1)[1].split('\n  },', 1)[0]
         shapes = re.findall(r'\.shape = \{([^}]+)\}', final)
@@ -76,7 +84,7 @@ def limit_stages(mesh_root, app, output, count):
     retained = {tile for stage in execution['stages'] for tile in stage['submesh']['tile_ids']}
     atomic_json(output / 'diagnostic-execution-plan.json', execution)
     for tile in retained:
-        path = magia_sdk.tile_source(app, execution['mesh'], tile)
+        path = tile_source(app, tile)
         source = path.read_text()
         for producer in re.findall(r'\.src_hartid = (\d+)', source):
             if int(producer) not in retained:
@@ -100,7 +108,9 @@ def limit_stages(mesh_root, app, output, count):
     return execution
 
 
-def monitor(mesh_root, output, sdk, command, env):
+def monitor(mesh_root, output, sdk, command, env, *, tokens=2, application=None, maps_log=None):
+    log_path = maps_log or output / 'maps.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path = output / 'diagnostic-execution-plan.json'
     execution = json.loads((plan_path if plan_path.exists() else mesh_root / 'execution-plan.json').read_text())
     stage_for_tile, operations, stages = {}, {}, []
@@ -111,10 +121,9 @@ def monitor(mesh_root, output, sdk, command, env):
             if tile in stage_for_tile:
                 raise ValueError(f'Tile {tile} assigned to multiple stages')
             stage_for_tile[tile] = stage_id
-            source = magia_sdk.tile_source(output / 'application', execution['mesh'], tile).read_text()
+            source = tile_source(application or output / 'application', tile).read_text()
             operations[tile] = re.findall(r'\.kind = (OP_[A-Z0-9_]+),', source)
     atomic_json(output / 'stage-map.json', stages)
-    tokens = 2
     buffers = {}
     output_manifest = output / "output-buffers.json"
     expected_buffers = sum(len(v["outputs"]) * tokens for v in json.loads(output_manifest.read_text())) if output_manifest.exists() else 0
@@ -122,6 +131,7 @@ def monitor(mesh_root, output, sdk, command, env):
     completed, computed = defaultdict(set), defaultdict(set)
     active, successful, errors = {}, set(), []
     reported_compute, reported_completion = set(), set()
+    stage_begins, stage_compute_ends, stage_processing_ends = {}, {}, {}
     first_start = time.monotonic()
     last_event = None
     last_cycle = 0
@@ -135,7 +145,8 @@ def monitor(mesh_root, output, sdk, command, env):
                                     'monitor_pid': os.getpid(), 'simulator_pid': process.pid,
                                     'mesh': execution['mesh']['width'], 'stages': len(stages),
                                     'tiles': len(stage_for_tile), 'tokens': tokens,
-                                    'command': command, 'model_directory': env.get('GVRUN_MODEL_PATH', str(sdk / 'gvsoc/install/models'))})
+                                    'command': command, 'maps_log': str(log_path),
+                                    'model_directory': env.get('GVRUN_MODEL_PATH', str(sdk / 'gvsoc/install/models'))})
     print(f'RUN_STARTED simulator_pid={process.pid} stages={len(stages)} tiles={len(stage_for_tile)} tokens={tokens}', flush=True)
     messages = queue.Queue()
 
@@ -181,7 +192,7 @@ def monitor(mesh_root, output, sdk, command, env):
     values = re.compile(r'(\w+)=([^\s]+)')
     next_snapshot = 0
     snapshot()
-    with (output / 'maps.log').open('w', buffering=1) as log, (output / 'stage-events.jsonl').open('w', buffering=1) as events:
+    with log_path.open('w', buffering=1) as log, (output / 'stage-events.jsonl').open('w', buffering=1) as events:
         while True:
             try:
                 line = messages.get(timeout=1)
@@ -216,6 +227,9 @@ def monitor(mesh_root, output, sdk, command, env):
                         buffers[(tile, token, int(data['output']))] = record
                         events.write(json.dumps(record) + '\n')
                     elif kind == 'MAPS_KERNEL_BEGIN':
+                        key = (stage_id, token)
+                        cycle = int(data['cycle'])
+                        stage_begins[key] = min(stage_begins.get(key, cycle), cycle)
                         active[tile] = record
                     elif kind == 'MAPS_KERNEL_STEP':
                         if tile in active:
@@ -225,9 +239,13 @@ def monitor(mesh_root, output, sdk, command, env):
                         active.pop(tile, None)
                         successful.add((tile, token, op))
                         if op == len(operations[tile]) - 1:
-                            computed[(stage_id, token)].add(tile)
+                            key = (stage_id, token)
+                            computed[key].add(tile)
+                            stage_compute_ends[key] = max(stage_compute_ends.get(key, 0), int(data['cycle']))
                     elif kind == 'MAPS_TOKEN_DONE':
-                        completed[(stage_id, token)].add(tile)
+                        key = (stage_id, token)
+                        completed[key].add(tile)
+                        stage_processing_ends[key] = max(stage_processing_ends.get(key, 0), int(data['cycle']))
                     else:
                         errors.append(record)
                         state = 'kernel_failed' if kind == 'MAPS_KERNEL_ERROR' else 'runtime_failed'
@@ -242,8 +260,12 @@ def monitor(mesh_root, output, sdk, command, env):
                             reported.add(key)
                             result = {'event': event, 'stage': stage_id, 'token': token,
                                       'name': stages[stage_id]['name'], 'tiles': len(bucket[key]), 'observed_at': now()}
+                            ends = stage_compute_ends if event == 'STAGE_COMPUTE_DONE' else stage_processing_ends
+                            end = ends.get(key)
+                            begin = stage_begins.get(key)
+                            result.update(cycle=end, elapsed_cycles=end-begin if begin is not None and end is not None else None)
                             events.write(json.dumps(result) + '\n')
-                            print(f'{event} stage={stage_id} token={token} tiles={len(bucket[key])} name={stages[stage_id]["name"]}', flush=True)
+                            print(f'{event} stage={stage_id} token={token} tiles={len(bucket[key])} cycle={end} elapsed_cycles={result["elapsed_cycles"]} name={stages[stage_id]["name"]}', flush=True)
             if time.monotonic() >= next_snapshot:
                 snapshot()
                 next_snapshot = time.monotonic() + 15
@@ -258,9 +280,100 @@ def monitor(mesh_root, output, sdk, command, env):
     snapshot()
     (output / 'exit-status').write_text(str(result) + '\n')
     if errors:
-        (output / 'failure.md').write_text('# MobileViT monitored run failure\n\n```json\n' + json.dumps(errors, indent=2) + '\n```\n\nSee progress.json for active kernels and pending tiles, and maps.log for raw output.\n')
+        (output / 'failure.md').write_text('# MobileViT monitored run failure\n\n```json\n' + json.dumps(errors, indent=2) + '\n```\n\nSee progress.json for active kernels and pending tiles, and ' + str(log_path) + ' for raw output.\n')
     print(f'RUN_FINISHED state={state} exit_status={result} completed_tile_tokens={sum(len(v) for v in completed.values())}/{expected}', flush=True)
     return 0 if state == 'completed' else 1
+
+
+def prepare_progress(app):
+    cmake = app / 'CMakeLists.txt'
+    bundle = cmake.read_text()
+    transpose = 'add_spatz_task(' in bundle
+    if transpose and 'transpose/fp16/spatz/spatz_task/transpose_strided_fp16_spatz_task.c' not in bundle:
+        bundle = bundle.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/transpose/fp16/spatz/spatz_task/transpose_strided_fp16_spatz_task.c\n', 1)
+        bundle = bundle.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/transpose/fp16/spatz/include\n', 1)
+        bundle += '\ntarget_compile_definitions(maps_mobilevit PRIVATE MAPS_HAS_TRANSPOSE_SPATZ_TASK=1)\n'
+        cmake.write_text(bundle)
+    # Preserve raw output values for tolerance-based validation after the run.
+    hooks=app/'src/application.c'
+    if hooks.exists():
+        hook_source=hooks.read_text()
+        if 'MAPS_OUTPUT_BYTES' not in hook_source:
+            handler=hook_source.find('void maps_mobilevit_handle_output(')
+            tail=hook_source[handler:] if handler>=0 else ''
+            pointer=re.search(r'const uint8_t \*(\w+) = maps_mobilevit_output_\w+\(token\);',tail)
+            size=re.search(r'index < (\d+)u;',tail)
+            if pointer and size:
+                name=pointer[1]; count=int(size[1]); end=hook_source.rfind('\n}')
+                dump=(f'\n  for (uint32_t offset=0; offset<{count}u; offset+=16u) {{\n'
+                      '    printf("MAPS_OUTPUT_BYTES token=%u offset=%u data=", token, offset);\n'
+                      f'    for (uint32_t i=offset; i<offset+16u && i<{count}u; ++i) printf("%02x", {name}[i]);\n'
+                      '    printf("\\n");\n  }\n')
+                hooks.write_text(hook_source[:end]+dump+hook_source[end:])
+    runner = app / 'src/maps_mobilevit_runner.c'
+    source = runner.read_text()
+    if transpose and 'runtime.transpose_fp16_task =' not in source:
+        source = source.replace('  runtime.relu_fp16_task =', '  runtime.transpose_fp16_task = TRANSPOSE_STRIDED_FP16_SPATZ_TASK;\n  runtime.relu_fp16_task =', 1)
+    for field, symbol, task in (
+        ('depthwise_conv_fp16_task', 'DEPTHWISE_CONV_FP16_SPATZ_TASK', 'depthwise_conv_fp16_spatz_task.c'),
+        ('sigmoid_fp16_task', 'SIGMOID_FP16_SPATZ_TASK', 'sigmoid_fp16_spatz_task.c'),
+    ):
+        binding = f'  runtime.{field} = {symbol};\n'
+        if task not in bundle:
+            source = source.replace(binding, '')
+        elif f'runtime.{field} =' not in source:
+            source = source.replace('  runtime.relu_fp16_task =', binding + '  runtime.relu_fp16_task =', 1)
+    source = source.replace('if (maps_operation_runtime_init(&runtime) != 0)\n    return -1;', '''int init_result = maps_operation_runtime_init(&runtime);
+  if (init_result != 0) {
+    printf("MAPS_INIT_ERROR tile=%u code=%d\\n", hartid, init_result);
+    return -1;
+  }
+  printf("MAPS_INIT_DONE tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
+    if 'printf("MAPS_TILE_READY ' not in source:
+        source = source.replace('maps_fifo_init_tile(&plan);', '''maps_fifo_init_tile(&plan);
+  printf("MAPS_TILE_READY tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
+    runner.write_text(source)
+
+
+def simulation_environment():
+    env = os.environ.copy()
+    toolchain = Path('/home/zaino/repos/toolchains')
+    llvm = Path(env.get('LLVM_INSTALL_DIR', toolchain / 'llvm20-root/usr/lib/llvm-20'))
+    env['LLVM_INSTALL_DIR'] = str(llvm)
+    env['LD_LIBRARY_PATH'] = str(llvm.parent / 'x86_64-linux-gnu') + ':' + env.get('LD_LIBRARY_PATH', '')
+    env['PATH'] = str(Path(sys.executable).parent) + ':' + str(toolchain / 'pulp-toolchain/bin') + ':' + env['PATH']
+    env['CMAKE_BUILD_PARALLEL_LEVEL'] = env.get('CMAKE_BUILD_PARALLEL_LEVEL', '8')
+    return env
+
+
+def run_simulation(args, mesh_root, sdk, output, app, build, env):
+    execution = json.loads((mesh_root / 'execution-plan.json').read_text())
+    mesh_size = execution['mesh']['width']
+    work = (args.work_dir or output / 'gvsoc').resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    platform_tree = args.platform_tree
+    if args.fifo_event_sleep and platform_tree is None:
+        from fifo_sleep_tree import build_platform_tree
+        atomic_json(output / 'progress.json', {'state': 'building_platform_tree', 'checked_at': now()})
+        try:
+            platform_tree = build_platform_tree(sdk, mesh_size, output / 'platform-tree', env)
+        except subprocess.CalledProcessError as error:
+            atomic_json(output / 'progress.json', {'state': 'platform_tree_build_failed',
+                                                 'checked_at': now(), 'code': error.returncode})
+            raise
+    command = magia_sdk.gvrun_command(sdk, build, 'maps_mobilevit', work, mesh_size)
+    if args.fifo_event_sleep:
+        command[-1:-1] = ['--attr', 'magia_v3/fifo_events=1']
+    if platform_tree:
+        command[-1:-1] = ['--gv-opt', f'platform_tree={platform_tree.resolve()}']
+    if args.instruction_trace:
+        trace_tiles = ['[0-9]+'] if args.trace_tiles == 'all' else args.trace_tiles.split(',')
+        for tile in trace_tiles:
+            command[-1:-1] = [f'--trace=tile-{tile}-cv32-core/insn:cv32-insn.log',
+                              f'--trace=tile-{tile}-snitch-spatz/insn:spatz-insn.log']
+        command[-1:-1] = ['--trace-level=trace', '--trace=kill-module']
+    return monitor(mesh_root, output, sdk, command, env, tokens=args.tokens,
+                   application=app, maps_log=args.maps_log.resolve() if args.maps_log else None)
 
 
 def main():
@@ -269,27 +382,76 @@ def main():
     parser.add_argument('--sdk-root', type=Path, default=magia_sdk.default_sdk_root())
     parser.add_argument('--output', type=Path)
     parser.add_argument('--stage-limit', type=int, help='run only the first N stages on the original mesh')
+    sleep = parser.add_mutually_exclusive_group()
+    sleep.add_argument('--fifo-event-sleep', dest='fifo_event_sleep', action='store_true',
+                       help='GVSoC FIFO doorbells and event-driven receive sleep (default)')
+    sleep.add_argument('--no-fifo-event-sleep', dest='fifo_event_sleep', action='store_false',
+                       help='use polling FIFO receives')
+    parser.set_defaults(fifo_event_sleep=True)
+    parser.add_argument('--prepare-application', type=Path, help='only add live progress markers to this generated application')
+    parser.add_argument('--sdk-build', type=Path, help='run an already-built application without copying or rebuilding it')
+    parser.add_argument('--tokens', type=int, default=2, help='number of execution tokens in the generated application')
+    parser.add_argument('--maps-log', type=Path, help='raw simulator log path (default: output/maps.log)')
+    parser.add_argument('--work-dir', type=Path, help='GVSoC work directory (default: output/gvsoc)')
+    parser.add_argument('--instruction-trace', action='store_true', help='enable CV32 and Spatz instruction traces')
+    parser.add_argument('--trace-tiles', default='all', help='instruction trace tile IDs: all or N,N,...')
+    parser.add_argument('--platform-tree', type=Path,
+                        help='matching compiled GVSoC platform-tree library for an experimental model')
     parser.add_argument('--foreground', action='store_true', help='run the monitor in this process')
     args = parser.parse_args()
+    if not 1 <= args.tokens <= 16:
+        parser.error('--tokens must be 1..16')
+    if args.sdk_build and args.stage_limit is not None:
+        parser.error('--sdk-build cannot be combined with --stage-limit')
+    if args.trace_tiles != 'all':
+        if not re.fullmatch(r'(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*', args.trace_tiles):
+            parser.error('--trace-tiles must be all or comma-separated non-negative tile IDs')
+        args.instruction_trace = True
     mesh_root, sdk = args.mesh_root.resolve(), args.sdk_root.resolve()
     output = (args.output or mesh_root / 'maps-gvsoc-diagnostic' / ('full-monitored-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))).resolve()
+    execution = json.loads((mesh_root / 'execution-plan.json').read_text())
+    tile_count = execution['mesh']['width'] * execution['mesh']['height']
+    if args.trace_tiles != 'all' and any(int(t) >= tile_count for t in args.trace_tiles.split(',')):
+        parser.error('--trace-tiles includes a tile outside the mesh')
+    if args.prepare_application:
+        prepare_progress(args.prepare_application.resolve())
+        return 0
     output.mkdir(parents=True, exist_ok=True)
     if not args.foreground:
         command = [sys.executable, '-u', str(Path(__file__).resolve()), '--mesh-root', str(mesh_root),
                    '--sdk-root', str(sdk), '--output', str(output), '--foreground']
         if args.stage_limit is not None:
             command.extend(['--stage-limit', str(args.stage_limit)])
+        command.append('--fifo-event-sleep' if args.fifo_event_sleep else '--no-fifo-event-sleep')
+        command.extend(['--tokens', str(args.tokens)])
+        for option, value in [('--sdk-build', args.sdk_build), ('--maps-log', args.maps_log), ('--work-dir', args.work_dir)]:
+            if value:
+                command.extend([option, str(value.resolve())])
+        if args.instruction_trace:
+            command.extend(['--instruction-trace', '--trace-tiles', args.trace_tiles])
+        if args.platform_tree:
+            command.extend(['--platform-tree', str(args.platform_tree.resolve())])
         with (output / 'monitor.log').open('w') as log:
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         (output / 'monitor.pid').write_text(str(process.pid) + '\n')
         print(json.dumps({'monitor_pid': process.pid, 'output': str(output)}, indent=2))
         return 0
     (output / 'monitor.pid').write_text(str(os.getpid()) + '\n')
+    if args.sdk_build:
+        app = mesh_root / 'maps-application'
+        build = args.sdk_build.resolve()
+        if not (build / 'bin/maps_mobilevit').is_file():
+            parser.error(f'Missing built binary: {build / "bin/maps_mobilevit"}')
+        return run_simulation(args, mesh_root, sdk, output, app, build, simulation_environment())
+    if args.tokens != 2:
+        parser.error('standalone rebuild expects the existing two-token input set; --sdk-build supports other token counts')
     atomic_json(output / 'progress.json', {'state': 'building', 'checked_at': now()})
     app = output / 'application'
     shutil.copytree(mesh_root / 'maps-application', app, dirs_exist_ok=True)
     cmake = app / 'CMakeLists.txt'
     source = cmake.read_text()
+    if args.fifo_event_sleep:
+        source += '\ntarget_compile_definitions(maps_mobilevit PRIVATE MAPS_FIFO_EVENT_SLEEP=1)\n'
     if 'depthwise_conv/fp16/spatz/spatz_task/depthwise_conv_fp16_spatz_task.c' not in source:
         source = source.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/fp16/spatz/spatz_task/depthwise_conv_fp16_spatz_task.c\n')
         source = source.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/fp16/spatz/include\n')
@@ -303,21 +465,7 @@ def main():
     source = re.sub(r'^add_subdirectory\([^\n]*full_mesh\)\n', '', source, flags=re.M)
     source = re.sub(r'target_compile_definitions\(maps_mobilevit PRIVATE\s+MAPS_EXPERIMENT_TRACE=1\s*\)', '', source)
     cmake.write_text(source)
-    runner = app / 'src/maps_mobilevit_runner.c'
-    source = runner.read_text()
-    if 'runtime.depthwise_conv_fp16_task =' not in source:
-        source = source.replace('  runtime.relu_fp16_task =', '  runtime.depthwise_conv_fp16_task = DEPTHWISE_CONV_FP16_SPATZ_TASK;\n  runtime.relu_fp16_task =', 1)
-    if 'runtime.sigmoid_fp16_task =' not in source:
-        source = source.replace('  runtime.relu_fp16_task =', '  runtime.sigmoid_fp16_task = SIGMOID_FP16_SPATZ_TASK;\n  runtime.relu_fp16_task =', 1)
-    source = source.replace('if (maps_operation_runtime_init(&runtime) != 0)\n    return -1;', '''int init_result = maps_operation_runtime_init(&runtime);
-  if (init_result != 0) {
-    printf("MAPS_INIT_ERROR tile=%u code=%d\\n", hartid, init_result);
-    return -1;
-  }
-  printf("MAPS_INIT_DONE tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
-    source = source.replace('maps_fifo_init_tile(&plan);', '''maps_fifo_init_tile(&plan);
-  printf("MAPS_TILE_READY tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
-    runner.write_text(source)
+    prepare_progress(app)
     if args.stage_limit is not None:
         limit_stages(mesh_root, app, output, args.stage_limit)
     env = magia_sdk.build_env(sdk)
@@ -332,10 +480,7 @@ def main():
     except subprocess.CalledProcessError as error:
         atomic_json(output / 'progress.json', {'state': 'build_failed', 'checked_at': now(), 'code': error.returncode})
         raise
-    work = output / 'gvsoc'
-    work.mkdir(exist_ok=True)
-    command = magia_sdk.gvrun_command(sdk, build, 'maps_mobilevit', work, mesh_size)
-    return monitor(mesh_root, output, sdk, command, env)
+    return run_simulation(args, mesh_root, sdk, output, app, build, env)
 
 
 if __name__ == '__main__':
