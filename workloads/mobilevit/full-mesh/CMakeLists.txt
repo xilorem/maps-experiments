@@ -9,7 +9,7 @@
 # it (see the comment in any of those shims).
 set(TEST_NAME onnx_mobilevit_full_mesh)
 
-set(KERNELS_DIR ${CMAKE_SOURCE_DIR}/kernels/spatz_fp16)
+set(KERNELS_DIR ${CMAKE_SOURCE_DIR}/kernels)
 
 set(MVIT_KERNELS
     conv2dgemm
@@ -29,17 +29,17 @@ set(MVIT_TASK_SOURCES "")
 set(MVIT_KERNEL_SOURCES "")
 set(MVIT_KERNEL_INCLUDES "")
 foreach(K ${MVIT_KERNELS})
-    list(APPEND MVIT_TASK_SOURCES   ${KERNELS_DIR}/${K}/spatz_task/${K}_fp16_spatz_task.c)
-    list(APPEND MVIT_KERNEL_SOURCES ${KERNELS_DIR}/${K}/src/${K}_fp16_spatz.c)
-    list(APPEND MVIT_KERNEL_INCLUDES ${KERNELS_DIR}/${K}/include)
+    list(APPEND MVIT_TASK_SOURCES   ${KERNELS_DIR}/${K}/fp16/spatz/spatz_task/${K}_fp16_spatz_task.c)
+    list(APPEND MVIT_KERNEL_SOURCES ${KERNELS_DIR}/${K}/fp16/spatz/src/${K}_fp16_spatz.c)
+    list(APPEND MVIT_KERNEL_INCLUDES ${KERNELS_DIR}/${K}/fp16/spatz/include)
 endforeach()
 
 # 18 of the 43 Muls broadcast, which is a second task in the same kernel directory.
-list(APPEND MVIT_TASK_SOURCES ${KERNELS_DIR}/mul/spatz_task/mul_bcast_fp16_spatz_task.c)
+list(APPEND MVIT_TASK_SOURCES ${KERNELS_DIR}/mul/fp16/spatz/spatz_task/mul_bcast_fp16_spatz_task.c)
 
 # No Add here broadcasts, but add/src references ADD_BCAST_FP16_SPATZ_TASK unconditionally
 # the way mul/src does, so the task has to be in this binary's table to link.
-list(APPEND MVIT_TASK_SOURCES ${KERNELS_DIR}/add/spatz_task/add_bcast_fp16_spatz_task.c)
+list(APPEND MVIT_TASK_SOURCES ${KERNELS_DIR}/add/fp16/spatz/spatz_task/add_bcast_fp16_spatz_task.c)
 
 add_spatz_task(
     TEST_NAME ${TEST_NAME}

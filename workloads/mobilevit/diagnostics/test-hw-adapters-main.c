@@ -23,26 +23,27 @@ static inline uint32_t clean_half(uint32_t x) {
 }
 int main(void) {
     uint32_t hartid = get_hartid();
-    idma_config_t ic = {.hartid=hartid};
-    idma_controller_t idma = {.cfg=&ic,.api=&idma_api};
-    redmule_config_t rc = {.hartid=hartid};
-    redmule_controller_t redmule = {.cfg=&rc,.api=&redmule_api};
-    fsync_config_t fc = {.hartid=hartid};
-    fsync_controller_t fsync = {.cfg=&fc,.api=&fsync_api};
-    eu_config_t ec = {.hartid=hartid};
-    eu_controller_t eu = {.cfg=&ec,.api=&eu_api};
-    idma_init(&idma); redmule_init(&redmule); fsync_init(&fsync); eu_init(&eu);
+    idma_init(); redmule_init(); fsync_init(); eu_init();
     eu_clear_events(0xffffffffu);
-    eu_fsync_init(&eu,0u); eu_idma_init(&eu,0u); eu_redmule_init(&eu,0u);
+    eu_fsync_init(0u); eu_idma_init(0u); eu_redmule_init(0u);
     if (hartid == 0) {
-        maps_operation_runtime_t runtime = {
-            .idma_ctrl=&idma,.redmule_ctrl=&redmule,.eu_ctrl=&eu,
-            .kernel_abi_version=2,.task_bundle_abi_version=2,
-            .spatz_binary_start=SPATZ_BINARY_START,
-            .spatz_params=(void *)(get_l1_base(hartid)+MAPS_OPERATION_TASK_SCRATCH_OFFSET),
-            .spatz_params_bytes=MAPS_OPERATION_TASK_SCRATCH_BYTES,
-            .depthwise_conv_fp16_task=DEPTHWISE_CONV_FP16_SPATZ_TASK,
-        };
+        /* Field by field: CORE-V GCC ICEs (maybe_postinc) on a zero-filled
+         * designated initialiser. */
+        maps_operation_runtime_t runtime;
+        runtime.kernel_abi_version=MAPS_KERNEL_ABI_VERSION;
+        runtime.task_bundle_abi_version=MAPS_TASK_BUNDLE_ABI_VERSION;
+        runtime.spatz_binary_start=SPATZ_BINARY_START;
+        runtime.spatz_params=(void *)(get_l1_base(hartid)+MAPS_OPERATION_TASK_SCRATCH_OFFSET);
+        runtime.spatz_params_bytes=MAPS_OPERATION_TASK_SCRATCH_BYTES;
+        runtime.spatz_initialized=0u;
+        runtime.background=0;
+        runtime.background_ctx=0;
+        runtime.add_fp16_task=0u; runtime.mul_bcast_fp16_task=0u; runtime.matmul_fp16_task=0u;
+        runtime.relu_fp16_task=0u; runtime.sigmoid_fp16_task=0u;
+        runtime.depthwise_conv_fp16_task=DEPTHWISE_CONV_FP16_SPATZ_TASK;
+        runtime.softmax_exp_fp16_task=0u; runtime.group_reduce_fp16_task=0u;
+        runtime.group_centered_reduce_fp16_task=0u; runtime.group_normalize_fp16_task=0u;
+        runtime.reducesum_fp16_task=0u; runtime.reducemax_fp16_task=0u; runtime.binary_bcast_fp16_task=0u;
         int init=maps_operation_runtime_init(&runtime);
         errors=init != 0;
         printf("HW_INIT code=%d cases=%u\n",init,(uint32_t)(sizeof(cases)/sizeof(cases[0])));
@@ -51,7 +52,7 @@ int main(void) {
             tile_plan_t plan={.hartid=hartid,.l1_data_base=get_l1_base(hartid),.num_slices=4,.slices=tc->slices};
             for (uint32_t token=0; token<2; ++token) {
                 for (uint32_t j=0;j<tc->op.num_inputs;++j)
-                    errors += maps_idma_copy_1d_ticketed(&idma,0u,(uint32_t)tc->inputs[token][j],plan.l1_data_base+tc->slices[j].l1_offset_bytes,tc->sizes[token][j],&eu) != 0;
+                    errors += maps_idma_copy_1d_ticketed(0u,(uint32_t)tc->inputs[token][j],plan.l1_data_base+tc->slices[j].l1_offset_bytes,tc->sizes[token][j]) != 0;
                 volatile uint16_t *actual=(volatile uint16_t *)(plan.l1_data_base+tc->slices[3].l1_offset_bytes);
                 for (uint32_t i=0;i<tc->output_bytes/2;++i) actual[i]=0;
                 int result=maps_execute_operation(&plan,&tc->op,0,&runtime);
@@ -70,6 +71,6 @@ int main(void) {
         }
         spatz_clk_dis();
     }
-    fsync_sync_global(&fsync); eu_fsync_wait(&eu,WFE);
+    fsync_sync_global(); eu_fsync_wait(WFE);
     return errors ? -1 : 0;
 }

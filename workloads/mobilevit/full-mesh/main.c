@@ -5,11 +5,13 @@
 
 #include "eventunit.h"
 #include "fsync.h"
+#include "idma.h"
 
 #include "kernel_test_utils.h"
 #include "mobilevit_graph.h"
 
 #include "utils/maps_operation_indexing.h"
+#include "utils/performance_utils.h"
 
 #include "add_fp16_spatz.h"
 #include "conv2dgemm_fp16_spatz.h"
@@ -123,7 +125,7 @@ static void run_layer(const mvit_layer_t *L, uint32_t token)
          * shape[3], so the axis-(-1) softmax is passed flattened that way. */
         uint32_t sm_shape[4] = {L->sm_rows, 1, 1, L->sm_len};
 
-        MAGIA_softmax_fp16_spatz(src0, dst, sm_shape);
+        MAGIA_softmax_fp16_spatz(src0, dst, sm_shape[0] * sm_shape[1] * sm_shape[2], sm_shape[3], 1u);
         break;
     }
 
@@ -199,35 +201,35 @@ static uint32_t read_cycle(void)
     return cycle;
 }
 
-static void barrier(fsync_controller_t *fsync, eu_controller_t *eu)
+static void barrier(void)
 {
-    fsync_sync_global(fsync);
-    eu_fsync_wait(eu, WFE);
+    fsync_sync_global();
+    eu_fsync_wait(WFE);
 }
 
 int main(void)
 {
-    fsync_config_t fc = {.hartid = HID};
-    fsync_controller_t fsync = {.base = 0, .cfg = &fc, .api = &fsync_api};
-    eu_config_t ec = {.hartid = HID};
-    eu_controller_t eu = {.base = 0, .cfg = &ec, .api = &eu_api};
+    /* The cycle counter starts inhibited, and the kernels wait on the iDMA event. */
+    perf_init();
     kt_spatz_init((uint32_t)&_spatz_binary_start);
-    eu_fsync_init(&eu, 0);
-    fsync_init(&fsync);
-    barrier(&fsync, &eu);
+    idma_init();
+    eu_idma_init(0);
+    eu_fsync_init(0);
+    fsync_init();
+    barrier();
     if (HID == 0) window_start = read_cycle();
-    barrier(&fsync, &eu);
+    barrier();
     for (uint32_t token = 0; token < MVIT_TOKENS; ++token) {
         for (uint32_t i = 0; i < MVIT_NUM_LAYERS; ++i) {
             run_layer(&mobilevit_layers[i], token);
             if (i + 1 == MVIT_NUM_LAYERS)
                 output_cycles[HID][token] = read_cycle() - window_start;
-            barrier(&fsync, &eu);
+            barrier();
         }
         if (HID == 0)
             for (uint32_t i = 0; i < MVIT_OUTPUT_LEN; ++i)
                 outputs[token][i] = arena_at(MVIT_OUTPUT_OFF)[i];
-        barrier(&fsync, &eu);
+        barrier();
     }
     spatz_clk_dis();
     if (HID == 0) {
@@ -244,7 +246,15 @@ int main(void)
                 float diff = actual > expected ? actual - expected : expected - actual;
                 float magnitude = expected < 0 ? -expected : expected;
                 if ((bits & 0x7c00u) == 0x7c00u) ++nonfinite;
-                if (diff > 0.002f + 0.02f * magnitude) ++mismatches;
+                if (diff > 0.002f + 0.02f * magnitude) {
+                    /* printf has no %f: values in millionths, plus the raw FP16 bits. */
+                    if (mismatches < 8u)
+                        printf("REFERENCE_MISMATCH token=%u index=%u actual=%d expected=%d "
+                               "actual_bits=%04x expected_bits=%04x\n",
+                               token, i, (int)(actual * 1e6f), (int)(expected * 1e6f), bits,
+                               ((const uint16_t *)ref)[i]);
+                    ++mismatches;
+                }
             }
             printf("REFERENCE_COMPLETION token=%u cycle=%u\n", token, completion);
             printf("REFERENCE_VALIDATION token=%u mismatches=%u nonfinite=%u\n",

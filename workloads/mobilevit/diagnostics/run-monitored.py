@@ -16,11 +16,12 @@ from pathlib import Path
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
+
+import magia_sdk
 
 
 def now():
@@ -34,9 +35,11 @@ def atomic_json(path, data):
 
 
 def add_prefix_outputs(app, output, execution):
-    manifest, declarations, cases = [], [], []
+    # The exporters go in the runner: the slice alias table the runtime fills is a
+    # static in a header inline, so a tile source would get its own, empty copy.
+    manifest, exporters, cases = [], [], []
     for tile in execution['stages'][-1]['submesh']['tile_ids']:
-        path = app / f'src/tiles/tile_{tile:04d}.c'
+        path = magia_sdk.tile_source(app, execution['mesh'], tile)
         source = path.read_text()
         final = source.rsplit('.outputs = ', 1)[1].split('\n  },', 1)[0]
         shapes = re.findall(r'\.shape = \{([^}]+)\}', final)
@@ -53,14 +56,13 @@ def add_prefix_outputs(app, output, execution):
         total = sum(sizes)
         name = f'maps_prefix_export_{tile}'
         manifest.append({'tile': tile, 'outputs': sizes, 'bytes_per_token': total})
-        declarations.append(f'extern void {name}(const fifo_tile_plan_t *plan);')
         cases.append(f'    case {tile}u: {name}(&plan); break;')
         code = 'static volatile uint8_t @NAME@_buffer[2][@SIZE@]\n    __attribute__((aligned(16), section(".l2_arena.maps_application")));\nvoid @NAME@(const fifo_tile_plan_t *plan) {\n    const op_desc_t *op = &plan->ops[plan->num_ops - 1u];\n    for (uint32_t token = 0; token < 2u; ++token) {\n        uint32_t cursor = 0;\n        for (uint32_t which = 0; which < op->num_outputs; ++which) {\n            const subslice_desc_t *sub = &op->outputs[which];\n            uint32_t count = maps_shape_elems(sub->rank, sub->shape);\n            const volatile uint8_t *src = (const volatile uint8_t *)local_subslice_addr(\n                (const tile_plan_t *)plan, sub, maps_token_slot((const tile_plan_t *)plan, token));\n            uint32_t checksum = 2166136261u, start = cursor;\n            for (uint32_t index = 0; index < count; ++index) {\n                uint32_t remaining = index, offset = 0;\n                for (uint32_t dim = sub->rank; dim-- > 0u;) {\n                    offset += (remaining % sub->shape[dim]) * sub->strides_bytes[dim];\n                    remaining /= sub->shape[dim];\n                }\n                for (uint32_t byte = 0; byte < sub->elem_bytes; ++byte) {\n                    uint8_t value = src[offset + byte];\n                    @NAME@_buffer[token][cursor++] = value;\n                    checksum = (checksum ^ value) * 16777619u;\n                }\n            }\n            asm volatile("fence rw, rw" ::: "memory");\n            uint32_t copied = 2166136261u;\n            for (uint32_t index = start; index < cursor; ++index) {\n                uint32_t value = @NAME@_buffer[token][index];\n                /* Explicitly zero upper bits: the current indexed-byte-load\n                 * checksum path disagrees with byte comparison in GVSoC. */\n                asm volatile("andi %0, %0, 255" : "+r"(value));\n                copied = (copied ^ value) * 16777619u;\n            }\n            if (copied != checksum) {\n                uint32_t mismatches = 0u;\n                for (uint32_t index = 0; index < count; ++index) {\n                    uint32_t remaining = index, offset = 0;\n                    for (uint32_t dim = sub->rank; dim-- > 0u;) {\n                        offset += (remaining % sub->shape[dim]) * sub->strides_bytes[dim];\n                        remaining /= sub->shape[dim];\n                    }\n                    for (uint32_t byte = 0; byte < sub->elem_bytes; ++byte) {\n                        uint32_t packed = start + index * sub->elem_bytes + byte;\n                        uint8_t expected = src[offset + byte];\n                        uint8_t actual = @NAME@_buffer[token][packed];\n                        if (actual != expected) {\n                            if (mismatches < 8u)\n                                printf("MAPS_PREFIX_BYTE_MISMATCH tile=%u token=%u output=%u byte=%u expected=%u actual=%u\\n",\n                                       plan->hartid, token, which, packed - start, expected, actual);\n                            ++mismatches;\n                        }\n                    }\n                }\n                printf("MAPS_PREFIX_OUTPUT_ERROR tile=%u token=%u op=%u output=%u code=-1 expected_checksum=%u actual_checksum=%u mismatches=%u bytes=%u address=%u cycle=%u\\n",\n                       plan->hartid, token, plan->num_ops - 1u, which, checksum, copied,\n                       mismatches, cursor - start, (uint32_t)(uintptr_t)&@NAME@_buffer[token][start], maps_read_cycle());\n                maps_trap();\n            }\n            printf("MAPS_PREFIX_OUTPUT_DONE tile=%u token=%u op=%u output=%u bytes=%u checksum=%u address=%u cycle=%u\\n",\n                   plan->hartid, token, plan->num_ops - 1u, which, cursor - start,\n                   copied, (uint32_t)(uintptr_t)&@NAME@_buffer[token][start], maps_read_cycle());\n        }\n    }\n}\n'.replace('@NAME@', name).replace('@SIZE@', str(total))
-        path.write_text(source + code)
+        exporters.append(code)
     atomic_json(output / 'output-buffers.json', manifest)
     runner = app / 'src/maps_mobilevit_runner.c'
-    source = runner.read_text().replace('int maps_mobilevit_run(void)', '\n'.join(declarations) + '\nint maps_mobilevit_run(void)')
-    anchor = '  fsync_sync_global(&fsync);\n  eu_fsync_wait(&event_unit, MAPS_MOBILEVIT_WAIT_MODE);\n  if (active)\n    maps_fifo_flush_experiment_trace('
+    source = runner.read_text().replace('int maps_mobilevit_run(void)', ''.join(exporters) + '\nint maps_mobilevit_run(void)')
+    anchor = '  fsync_sync_global();\n  eu_fsync_wait(MAPS_MOBILEVIT_WAIT_MODE);\n  if (active)\n    maps_fifo_flush_experiment_trace('
     replacement = '  if (active) {\n    switch (hartid) {\n' + '\n'.join(cases) + '\n    default: break;\n    }\n  }\n' + anchor
     assert anchor in source
     runner.write_text(source.replace(anchor, replacement, 1))
@@ -74,32 +76,12 @@ def limit_stages(mesh_root, app, output, count):
     retained = {tile for stage in execution['stages'] for tile in stage['submesh']['tile_ids']}
     atomic_json(output / 'diagnostic-execution-plan.json', execution)
     for tile in retained:
-        path = app / f'src/tiles/tile_{tile:04d}.c'
+        path = magia_sdk.tile_source(app, execution['mesh'], tile)
         source = path.read_text()
         for producer in re.findall(r'\.src_hartid = (\d+)', source):
             if int(producer) not in retained:
                 raise ValueError(f'Tile {tile} depends on excluded tile {producer}')
-        match = re.search(r'static const fifo_send_desc_t (\w+)\[\] = \{(.*?)\n\};', source, re.S)
-        if match:
-            blocks, depth, begin = [], 0, None
-            for i, character in enumerate(match[2]):
-                if character == '{':
-                    if depth == 0:
-                        begin = i
-                    depth += 1
-                elif character == '}':
-                    depth -= 1
-                    if depth == 0:
-                        block = match[2][begin:i + 1]
-                        destination = int(re.search(r'\.dst_hartid = (\d+)', block)[1])
-                        if destination in retained:
-                            blocks.append(block)
-            assert depth == 0
-            replacement = 'static const fifo_send_desc_t ' + match[1] + '[] = {\n' + ',\n'.join(blocks) + ',\n};' if blocks else ''
-            source = source[:match.start()] + replacement + source[match.end():]
-            source = re.sub(r'\.num_sends = \d+u,', f'.num_sends = {len(blocks)}u,', source)
-            if not blocks:
-                source = re.sub(r'\.sends = [^,]+,', '.sends = 0,', source)
+        source, _ = magia_sdk.filter_sends(source, lambda destination: destination in retained)
         path.write_text(source)
     cmake = app / 'CMakeLists.txt'
     source = cmake.read_text()
@@ -129,7 +111,7 @@ def monitor(mesh_root, output, sdk, command, env):
             if tile in stage_for_tile:
                 raise ValueError(f'Tile {tile} assigned to multiple stages')
             stage_for_tile[tile] = stage_id
-            source = (output / f'application/src/tiles/tile_{tile:04d}.c').read_text()
+            source = magia_sdk.tile_source(output / 'application', execution['mesh'], tile).read_text()
             operations[tile] = re.findall(r'\.kind = (OP_[A-Z0-9_]+),', source)
     atomic_json(output / 'stage-map.json', stages)
     tokens = 2
@@ -195,15 +177,6 @@ def monitor(mesh_root, output, sdk, command, env):
                                              'note': 'Kernel success means return code zero, not numerical verification. Tile/token processing completion may precede outgoing DMA drain.'})
         atomic_json(output / 'kernel-errors.json', errors)
 
-    def stop_simulator():
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-
     marker = re.compile(r'(MAPS_PREFIX_OUTPUT_DONE|MAPS_PREFIX_OUTPUT_ERROR|MAPS_KERNEL_STEP|MAPS_KERNEL_BEGIN|MAPS_KERNEL_DONE|MAPS_KERNEL_ERROR|MAPS_RUNTIME_ERROR|MAPS_INIT_DONE|MAPS_INIT_ERROR|MAPS_TILE_READY|MAPS_TOKEN_DONE)\b(.*)')
     values = re.compile(r'(\w+)=([^\s]+)')
     next_snapshot = 0
@@ -261,7 +234,7 @@ def monitor(mesh_root, output, sdk, command, env):
                         print('FAILURE ' + json.dumps(record), flush=True)
                         events.write(json.dumps(record) + '\n')
                         snapshot()
-                        stop_simulator()
+                        magia_sdk.stop_process_group(process)
                     for bucket, reported, event in [(computed, reported_compute, 'STAGE_COMPUTE_DONE'),
                                                       (completed, reported_completion, 'STAGE_PROCESSING_DONE')]:
                         key = (stage_id, token)
@@ -293,7 +266,7 @@ def monitor(mesh_root, output, sdk, command, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mesh-root', required=True, type=Path)
-    parser.add_argument('--sdk-root', type=Path, default=Path('/home/zaino/repos/magia-sdk-v3'))
+    parser.add_argument('--sdk-root', type=Path, default=magia_sdk.default_sdk_root())
     parser.add_argument('--output', type=Path)
     parser.add_argument('--stage-limit', type=int, help='run only the first N stages on the original mesh')
     parser.add_argument('--foreground', action='store_true', help='run the monitor in this process')
@@ -317,14 +290,14 @@ def main():
     shutil.copytree(mesh_root / 'maps-application', app, dirs_exist_ok=True)
     cmake = app / 'CMakeLists.txt'
     source = cmake.read_text()
-    if 'depthwise_conv/spatz_task/depthwise_conv_fp16_spatz_task.c' not in source:
-        source = source.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/spatz_task/depthwise_conv_fp16_spatz_task.c\n')
-        source = source.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/include\n')
+    if 'depthwise_conv/fp16/spatz/spatz_task/depthwise_conv_fp16_spatz_task.c' not in source:
+        source = source.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/fp16/spatz/spatz_task/depthwise_conv_fp16_spatz_task.c\n')
+        source = source.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/depthwise_conv/fp16/spatz/include\n')
     if 'MAPS_HAS_DEPTHWISE_CONV_SPATZ_TASK=1' not in source:
         source += '\ntarget_compile_definitions(maps_mobilevit PRIVATE MAPS_HAS_DEPTHWISE_CONV_SPATZ_TASK=1)\n'
-    if 'sigmoid/spatz_task/sigmoid_fp16_spatz_task.c' not in source:
-        source = source.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/sigmoid/spatz_task/sigmoid_fp16_spatz_task.c\n')
-        source = source.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/sigmoid/include\n')
+    if 'sigmoid/fp16/spatz/spatz_task/sigmoid_fp16_spatz_task.c' not in source:
+        source = source.replace('  TASK_SOURCES\n', '  TASK_SOURCES\n    ${MAPS_SPATZ_KERNELS_DIR}/sigmoid/fp16/spatz/spatz_task/sigmoid_fp16_spatz_task.c\n')
+        source = source.replace('  INCLUDE_DIRS\n', '  INCLUDE_DIRS\n    ${MAPS_SPATZ_KERNELS_DIR}/sigmoid/fp16/spatz/include\n')
     if 'MAPS_HAS_SIGMOID_SPATZ_TASK=1' not in source:
         source += '\ntarget_compile_definitions(maps_mobilevit PRIVATE MAPS_HAS_SIGMOID_SPATZ_TASK=1)\n'
     source = re.sub(r'^add_subdirectory\([^\n]*full_mesh\)\n', '', source, flags=re.M)
@@ -342,42 +315,26 @@ def main():
     return -1;
   }
   printf("MAPS_INIT_DONE tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
-    source = source.replace('maps_fifo_init_tile(&plan, &idma, &event_unit);', '''maps_fifo_init_tile(&plan, &idma, &event_unit);
+    source = source.replace('maps_fifo_init_tile(&plan);', '''maps_fifo_init_tile(&plan);
   printf("MAPS_TILE_READY tile=%u cycle=%u\\n", hartid, maps_read_cycle());''')
     runner.write_text(source)
     if args.stage_limit is not None:
         limit_stages(mesh_root, app, output, args.stage_limit)
-    env = os.environ.copy()
-    tools = Path('/home/zaino/repos/toolchains')
-    llvm = tools / 'llvm20-root/usr/lib/llvm-20'
-    env['LLVM_INSTALL_DIR'] = str(llvm)
-    env['LD_LIBRARY_PATH'] = str(llvm.parent / 'x86_64-linux-gnu') + ':' + env.get('LD_LIBRARY_PATH', '')
-    env['PATH'] = str(Path(sys.executable).parent) + ':' + str(tools / 'pulp-toolchain/bin') + ':' + env['PATH']
-    env['CMAKE_BUILD_PARALLEL_LEVEL'] = '8'
+    env = magia_sdk.build_env(sdk)
     execution = json.loads((mesh_root / 'execution-plan.json').read_text())
     mesh_size = execution['mesh']['width']
     assert mesh_size == execution['mesh']['height']
     build = output / 'sdk-build'
-    config = sdk / 'targets/magia_v3/include/addr_map/tile_config.h'
-    saved = config.read_bytes()
     try:
         with (output / 'build.log').open('w') as log:
-            for target in ['spatz_bootrom', 'maps_mobilevit']:
-                subprocess.run(['make', 'build', f'tiles={mesh_size}', f'CMAKE_BUILDDIR={build}',
-                                f'maps_application_dir={app}', 'maps_token_progress=1',
-                                'maps_kernel_progress=1', 'maps_experiment_trace=0', f'test={target}'],
-                               cwd=sdk, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+            magia_sdk.build(sdk, env, log, mesh_size, build, app, ['spatz_bootrom', 'maps_mobilevit'],
+                            ['maps_token_progress=1', 'maps_kernel_progress=1', 'maps_experiment_trace=0'])
     except subprocess.CalledProcessError as error:
         atomic_json(output / 'progress.json', {'state': 'build_failed', 'checked_at': now(), 'code': error.returncode})
         raise
-    finally:
-        config.write_bytes(saved)
     work = output / 'gvsoc'
     work.mkdir(exist_ok=True)
-    command = ['stdbuf', '-oL', '-eL', str(sdk / 'gvsoc/install/bin/gvrun'), '--target', 'magia_v3',
-               '--param', f'binary={build}/bin/maps_mobilevit', '--work-dir', str(work),
-               '--attr', f'magia_v3/n_tiles_x={mesh_size}', '--attr', f'magia_v3/n_tiles_y={mesh_size}',
-               '--attr', f'magia_v3/spatz_romfile={build}/bin/bootrom/spatz_init.bin', 'run']
+    command = magia_sdk.gvrun_command(sdk, build, 'maps_mobilevit', work, mesh_size)
     return monitor(mesh_root, output, sdk, command, env)
 
 

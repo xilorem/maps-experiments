@@ -4,25 +4,16 @@ Uses every distinct layout/origin/parameter combination in the frozen allocation
 """
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
 import time
 import numpy as np
 
+import magia_sdk
 
-def blocks(text):
-    result, depth, begin = [], 0, 0
-    for i, char in enumerate(text):
-        if char == '{':
-            if not depth: begin = i
-            depth += 1
-        elif char == '}':
-            depth -= 1
-            if not depth: result.append(text[begin:i+1])
-    assert depth == 0
-    return result
+
+blocks = magia_sdk.descriptor_blocks
 
 
 def field(text, name):
@@ -39,6 +30,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--mesh-root', required=True, type=Path)
     p.add_argument('--output', required=True, type=Path)
+    p.add_argument('--sdk-root', type=Path, default=magia_sdk.default_sdk_root())
+    p.add_argument('--timeout', type=float, default=3600, help='maximum simulator wall time in seconds (default: 3600)')
     args = p.parse_args()
     root, output = args.mesh_root.resolve(), args.output.resolve()
     app = output / 'application'; app.mkdir(parents=True, exist_ok=True)
@@ -122,7 +115,7 @@ def main():
     template=Path(__file__).with_name('test-hw-adapters-main.c').read_text()
     (app/'main.c').write_text(template.replace('@DECLARATIONS@',declarations).replace('@CASES@',',\n'.join(entries)))
     (app/'CMakeLists.txt').write_text('''set(MAPS_APPLICATION test_maps_hw_adapters)
-set(KERNEL_DIR ${CMAKE_SOURCE_DIR}/kernels/spatz_fp16/depthwise_conv)
+set(KERNEL_DIR ${CMAKE_SOURCE_DIR}/kernels/depthwise_conv/fp16/spatz)
 add_spatz_task(TEST_NAME ${MAPS_APPLICATION} TASK_SOURCES ${KERNEL_DIR}/spatz_task/depthwise_conv_fp16_spatz_task.c FIRST_TASK_NAME depthwise_conv_fp16_spatz_task INCLUDE_DIRS ${KERNEL_DIR}/include)
 add_executable(${MAPS_APPLICATION} main.c data.S)
 target_compile_options(${MAPS_APPLICATION} PRIVATE -O2)
@@ -132,21 +125,20 @@ target_embed_spatz_task(TARGET ${MAPS_APPLICATION} TASK_NAME ${MAPS_APPLICATION}
 ''')
     (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print('Generated',len(cases),'distinct layouts',flush=True)
-    sdk=Path('/home/zaino/repos/magia-sdk-v3');build=output/'sdk-build';env=os.environ.copy()
-    env['LLVM_INSTALL_DIR']='/home/zaino/repos/toolchains/llvm20-root/usr/lib/llvm-20';env['LD_LIBRARY_PATH']='/home/zaino/repos/toolchains/llvm20-root/usr/lib/x86_64-linux-gnu:'+env.get('LD_LIBRARY_PATH','');env['PATH']=str(Path(os.sys.executable).parent)+':/home/zaino/repos/toolchains/pulp-toolchain/bin:'+env['PATH'];env['CMAKE_BUILD_PARALLEL_LEVEL']='8'
-    cfg=sdk/'targets/magia_v3/include/addr_map/tile_config.h';saved=cfg.read_bytes()
-    try:
-        with (output/'build.log').open('w') as log:
-            for target in ('spatz_bootrom','test_maps_hw_adapters'):
-                subprocess.run(['make','build','tiles=2',f'CMAKE_BUILDDIR={build}',f'maps_application_dir={app}',f'test={target}'],cwd=sdk,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
-    finally:cfg.write_bytes(saved)
+    sdk=args.sdk_root.resolve();build=output/'sdk-build';env=magia_sdk.build_env(sdk)
+    with (output/'build.log').open('w') as log:
+        magia_sdk.build(sdk,env,log,2,build,app,('spatz_bootrom','test_maps_hw_adapters'))
     work=output/'gvsoc';work.mkdir(exist_ok=True)
     start=time.monotonic()
     with (output/'maps.log').open('w') as log:
-        proc=subprocess.run(['stdbuf','-oL','-eL',str(sdk/'gvsoc/install/bin/gvrun'),'--target','magia_v3','--param',f'binary={build}/bin/test_maps_hw_adapters','--work-dir',str(work),'--attr','magia_v3/n_tiles_x=2','--attr','magia_v3/n_tiles_y=2','--attr',f'magia_v3/spatz_romfile={build}/bin/bootrom/spatz_init.bin','run'],cwd=sdk,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=600)
+        proc=subprocess.Popen(magia_sdk.gvrun_command(sdk,build,'test_maps_hw_adapters',work,2),cwd=sdk,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        try:
+            exit_status=proc.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            magia_sdk.stop_process_group(proc);exit_status='timeout'
     text=(output/'maps.log').read_text();checks=re.findall(r'HW_CHECK case=(\d+) token=(\d+) kind=(\w+) values=(\d+) errors=(\d+) code=(-?\d+)',text)
-    passed=proc.returncode==0 and len(checks)==len(cases)*2 and all(int(c[4])==0 and int(c[5])==0 for c in checks)
-    stats={'passed':passed,'exit_status':proc.returncode,'wall_seconds':time.monotonic()-start,'cases':len(cases),'checks':len(checks),'values':sum(int(c[3]) for c in checks),'errors':sum(int(c[4]) for c in checks)}
+    passed=exit_status==0 and len(checks)==len(cases)*2 and all(int(c[4])==0 and int(c[5])==0 for c in checks)
+    stats={'passed':passed,'exit_status':exit_status,'wall_seconds':time.monotonic()-start,'cases':len(cases),'checks':len(checks),'values':sum(int(c[3]) for c in checks),'errors':sum(int(c[4]) for c in checks)}
     (output/'statistics.json').write_text(json.dumps(stats,indent=2)+'\n');print(stats,flush=True)
     return 0 if passed else 1
 

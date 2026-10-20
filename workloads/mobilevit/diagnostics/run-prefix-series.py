@@ -60,8 +60,9 @@ def main():
         (root / 'series.pid').write_text(str(proc.pid) + '\n')
         print(json.dumps({'pid': proc.pid, 'output': str(root)}, indent=2))
         return
-    stages = json.loads((mesh / 'execution-plan.json').read_text())['stages']
-    summary = {'state': 'running', 'mesh': '32x32', 'tokens': 2, 'stall_minutes': args.stall_minutes, 'results': []}
+    execution = json.loads((mesh / 'execution-plan.json').read_text())
+    stages = execution['stages']
+    summary = {'state': 'running', 'mesh': f"{execution['mesh']['width']}x{execution['mesh']['height']}", 'tokens': 2, 'stall_minutes': args.stall_minutes, 'results': []}
     runner = Path(__file__).with_name('run-monitored.py')
     start_count = 1
     if args.prior_series:

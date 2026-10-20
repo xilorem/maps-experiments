@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Report DMA AXI read responses that arrive ahead of earlier requests."""
+"""Report DMA AXI read bursts that complete ahead of earlier ones.
+
+Reads the trace of one tile's AXI to OBI iDMA read manager (idma_v3), e.g.
+--trace=tile-N-idma-axi2obi/axi_read/trace:dma-read.log. Bursts are identified
+by their outstanding-read slot, which is reused once the burst is done.
+"""
 
 import argparse
 import json
@@ -11,11 +16,11 @@ def analyze(path):
     pending, reordered = [], []
     sent, received = 0, 0
     for line in path.read_text().splitlines():
-        submission = re.search(r'Sending read burst to AXI \(burst: ([^,]+), base: (0x[0-9a-f]+)', line)
+        submission = re.search(r'Issuing read burst \(slot: (\d+), addr: (0x[0-9a-f]+)', line)
         if submission:
             pending.append({'request': submission[1], 'source_address': submission[2]})
             sent += 1
-        response = re.search(r'Handling end of read request \(req: ([^,]+),', line)
+        response = re.search(r'Read burst done \(slot: (\d+)\)', line)
         if response:
             received += 1
             index = next((i for i, request in enumerate(pending)

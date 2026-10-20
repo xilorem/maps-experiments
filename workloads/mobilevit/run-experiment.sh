@@ -66,6 +66,12 @@ repository_root="$(cd "$experiment_root/../.." && pwd)"
 checkout_root="$(dirname "$repository_root")"
 maps_root="${MAPS_ROOT:-$checkout_root/MAPS}"
 sdk_root="${MAGIA_SDK_ROOT:-$checkout_root/magia-sdk-v3}"
+# MAPS does not use the PULP cluster, so the SDK is built without it (pulp_cores=0,
+# which also selects the spatz_on_magia tests, where the full-mesh reference
+# lives). The GVSoC MAGIA v3 model needs at least one PULP core per tile; they
+# stay idle.
+pulp_cores="${PULP_CORES:-0}"
+gvsoc_pulp_cores="${GVSOC_PULP_CORES:-8}"
 python="${PYTHON:-$repository_root/.venv/bin/python}"
 if [[ ! -x "$python" ]]; then
   python=python3
@@ -149,10 +155,11 @@ target_compile_definitions(maps_mobilevit PRIVATE
 EOF
   fi
 
-  make -C "$sdk_root" gvsoc tiles="$tiles" 2>&1 | tee -a "$build_log"
+  make -C "$sdk_root" gvsoc tiles="$tiles" pulp_cores="$gvsoc_pulp_cores" 2>&1 | tee -a "$build_log"
 
   sdk_build_args=(
     tiles="$tiles"
+    pulp_cores="$pulp_cores"
     CMAKE_BUILDDIR="$sdk_build"
     maps_application_dir="$application"
     maps_token_progress="$maps_token_progress"
@@ -166,6 +173,7 @@ EOF
 
   make -C "$sdk_root" run \
     tiles="$tiles" \
+    pulp_cores="$gvsoc_pulp_cores" \
     CMAKE_BUILDDIR="$sdk_build" \
     GVSOC_WORK_DIR="$mesh_root/maps-gvsoc" \
     test=maps_mobilevit \
@@ -173,6 +181,7 @@ EOF
 
   make -C "$sdk_root" run \
     tiles="$tiles" \
+    pulp_cores="$gvsoc_pulp_cores" \
     CMAKE_BUILDDIR="$sdk_build" \
     GVSOC_WORK_DIR="$mesh_root/full-mesh-gvsoc" \
     test=onnx_mobilevit_full_mesh \
@@ -192,11 +201,9 @@ EOF
       imiss_work="$mesh_root/imiss-gvsoc"
       mkdir -p "$imiss_work"
       "$sdk_root/gvsoc/install/bin/gvrun" \
-        --target magia_v3 \
+        --target "magia_v3:n_tiles_x=$tiles,n_tiles_y=$tiles,nb_pulp_cores=$gvsoc_pulp_cores" \
         --param binary="$sdk_build/bin/maps_mobilevit" \
         --work-dir "$imiss_work" \
-        --attr "magia_v3/n_tiles_x=$tiles" \
-        --attr "magia_v3/n_tiles_y=$tiles" \
         --attr "magia_v3/spatz_romfile=$sdk_build/bin/bootrom/spatz_init.bin" \
         --trace-level=trace \
         --trace=kill-module \
